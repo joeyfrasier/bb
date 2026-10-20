@@ -1421,6 +1421,72 @@ describe("plugin service", () => {
     );
   });
 
+  it.each(["direct", "catalog"] as const)(
+    "switches a %s npm registration to a local path",
+    async (provenance) => {
+      const serverSource = `export default function plugin(bb) {
+      bb.settings.define({ floor: { type: "string", label: "Floor", default: "60" } });
+    }`;
+      const oldRoot = await writePlugin(join(workDir, "managed"), {
+        name: "bb-plugin-npm-switch",
+        serverSource,
+      });
+      const checkout = await writePlugin(join(workDir, "local"), {
+        name: "bb-plugin-npm-switch",
+        serverSource,
+      });
+      await service.installPath(oldRoot);
+      await service.updateSettings("npm-switch", { floor: "7" });
+      upsertInstalledPlugin(db, {
+        id: "npm-switch",
+        source: "npm:bb-plugin-npm-switch@1.0.0",
+        provenance:
+          provenance === "direct"
+            ? { kind: "direct" }
+            : { kind: "catalog", marketplace: "acme", entryId: "npm-switch" },
+        sourceIntent: {
+          kind: "npm",
+          packageName: "bb-plugin-npm-switch",
+          registry: "https://registry.npmjs.org",
+          requestedSpec: "1.0.0",
+          specKind: "exact",
+        },
+        exactResolution: {
+          kind: "npm",
+          version: "1.0.0",
+          integrity: "sha512-fixture",
+        },
+        updateState: {
+          lastCheckAt: null,
+          availableCompatibleVersion: null,
+          newestIncompatibleVersion: null,
+          statusDetail: null,
+        },
+        activeArtifactId: null,
+        rootDir: oldRoot,
+        version: "1.0.0",
+        enabled: true,
+        enabledFollowsDefault: false,
+      });
+
+      expect(await service.installPath(checkout)).toMatchObject({
+        id: "npm-switch",
+        source: `path:${checkout}`,
+        enabled: true,
+        status: "running",
+      });
+      expect(getInstalledPlugin(db, "npm-switch")).toMatchObject({
+        provenance: "direct",
+        sourceKind: "path",
+        catalogEntryId: null,
+        catalogMarketplaceName: null,
+      });
+      expect((await service.getSettings("npm-switch"))?.values).toEqual({
+        floor: "7",
+      });
+    },
+  );
+
   it("rejects a path move whose new checkout fails to start and keeps the old install running", async () => {
     const checkoutA = await writePlugin(join(workDir, "a"), {
       name: "bb-plugin-brittle",

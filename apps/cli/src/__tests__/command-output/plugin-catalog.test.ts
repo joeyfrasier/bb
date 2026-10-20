@@ -1,4 +1,6 @@
-import { sep } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   collectLogPayloads,
@@ -241,6 +243,57 @@ describe("bb plugin catalog", () => {
     expect(body.source.startsWith("path:")).toBe(true);
     expect(body.source.endsWith(`${sep}linear`)).toBe(true);
   });
+
+  it.each([
+    {
+      source: "git:https://github.com/acme/linear@main",
+      provenance: "direct",
+      preserves: true,
+    },
+    { source: "npm:bb-plugin-linear", provenance: "direct", preserves: true },
+    { source: "path:/previous/linear", provenance: "direct", preserves: true },
+    {
+      source: "git:https://github.com/acme/linear@main",
+      provenance: "catalog",
+      preserves: true,
+    },
+    { source: "builtin:linear", provenance: "builtin", preserves: false },
+  ])(
+    "previews preservation for an eligible $provenance $source path switch",
+    async ({ source, provenance, preserves }) => {
+      const checkout = await mkdtemp(join(tmpdir(), "bb-cli-source-switch-"));
+      try {
+        await writeFile(
+          join(checkout, "package.json"),
+          JSON.stringify({ name: "bb-plugin-linear", version: "1.5.0" }),
+        );
+        vi.mocked(fetch)
+          .mockResolvedValueOnce(
+            json({ plugins: [{ ...installedPlugin, source, provenance }] }),
+          )
+          .mockResolvedValueOnce(json({ ok: true, plugin: installedPlugin }));
+
+        await runCommand(
+          ["plugin", "install", `path:${checkout}`, "--yes"],
+          register,
+        );
+
+        const output = collectLogPayloads(vi.mocked(console.log)).join("\n");
+        expect(output).toContain(
+          `Installing bb-plugin-linear@1.5.0 from ${checkout}`,
+        );
+        expect(
+          output.includes(
+            "its settings, secrets, schedules, plugin data, and enabled state are kept",
+          ),
+        ).toBe(preserves);
+        if (preserves)
+          expect(output).toContain(`from ${installedPlugin.rootDir}`);
+      } finally {
+        await rm(checkout, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("installs a pasted GitHub repository URL as a direct source", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(

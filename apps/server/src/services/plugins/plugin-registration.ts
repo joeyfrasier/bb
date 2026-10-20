@@ -261,8 +261,8 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   ): InstalledPluginRow | undefined {
     if (
       existing === undefined ||
-      existing.provenance !== "direct" ||
-      existing.sourceKind !== "path" ||
+      existing.provenance === "builtin" ||
+      existing.sourceKind === "builtin" ||
       identity.provenance.kind !== "direct" ||
       identity.sourceIntent.kind !== "path" ||
       existing.sourcePath === identity.sourceIntent.canonicalPath

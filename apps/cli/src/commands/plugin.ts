@@ -1105,10 +1105,13 @@ export function registerPluginCommands(
                 const installed = plugins.find((p) => p.id === pluginId);
                 if (
                   installed !== undefined &&
-                  installed.source.startsWith("path:") &&
-                  installed.rootDir !== path
+                  installed.provenance !== "builtin" &&
+                  (installed.source.startsWith("git:") ||
+                    installed.source.startsWith("npm:") ||
+                    (installed.source.startsWith("path:") &&
+                      installed.rootDir !== path))
                 ) {
-                  summary = `${summary}\nThis moves "${pluginId}" from ${installed.rootDir}; its settings, secrets, and schedules are kept.`;
+                  summary = `${summary}\nThis moves "${pluginId}" from ${installed.rootDir}; its settings, secrets, schedules, plugin data, and enabled state are kept.`;
                 }
               }
             } catch {}

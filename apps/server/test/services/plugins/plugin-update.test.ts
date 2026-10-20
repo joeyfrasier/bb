@@ -3,6 +3,7 @@ import { pluginUpdateJobResponseSchema } from "@bb/server-contract";
 import { createPluginUpdateJobs } from "../../../src/services/plugins/plugin-update-jobs.js";
 import { execFile } from "node:child_process";
 import {
+  cp,
   mkdtemp,
   mkdir,
   readFile,
@@ -26,6 +27,7 @@ import {
   listPluginArtifacts,
   listPluginStateSnapshots,
   setPluginSettingsValues,
+  recordPluginScheduleResult,
   upsertPluginSchedule,
   upsertInstalledPlugin,
   upsertPluginMarketplace,
@@ -378,6 +380,165 @@ describe("plugin update service and routes", () => {
     db.$client.close();
     await rm(workDir, { recursive: true, force: true });
   });
+
+  describe.each(["direct", "catalog"] as const)(
+    "switching a %s managed install to a local path",
+    (provenance) => {
+      const serverSource = `
+      export default function plugin(bb) {
+        bb.settings.define({
+          floor: { type: "string", label: "Floor", default: "60" },
+          token: { type: "string", label: "Token", secret: true },
+        });
+        bb.background.schedule("sweep", "0 * * * *", async () => {});
+        globalThis.__managedSwitchVersion = "managed";
+      }`;
+
+      beforeEach(async () => {
+        if (provenance === "catalog") {
+          await service.remove("updater");
+          await service.installCatalogPlugin({
+            marketplace: "acme-plugins",
+            entryId: "updater",
+            pluginId: "updater",
+            source: `git:${repo}@main`,
+            selection: { kind: "root" },
+          });
+        }
+        await commitPlugin(repo, "1.0.1", undefined, serverSource);
+        await service.checkForUpdates("updater");
+        expect(await service.applyUpdate("updater")).toMatchObject({
+          ok: true,
+          result: { outcome: "updated" },
+        });
+        await service.updateSettings("updater", {
+          floor: "1",
+          token: "fixture-secret",
+        });
+        const api = service.getApi("updater");
+        if (api === undefined) throw new Error("managed plugin did not load");
+        api.storage
+          .database()
+          .exec(
+            "CREATE TABLE retained (value TEXT NOT NULL); INSERT INTO retained VALUES ('saved recap')",
+          );
+        await api.storage.kv.set("cursor", "retained cursor");
+        recordPluginScheduleResult(db, {
+          pluginId: "updater",
+          name: "sweep",
+          status: "ok",
+          error: null,
+          now: 1234,
+        });
+      });
+
+      it.each([true, false])(
+        "preserves the Git plugin's data, settings, schedules, and enabled=%s",
+        async (enabled) => {
+          const checkout = join(workDir, "local");
+          await cp(repo, checkout, { recursive: true });
+          await commitPlugin(
+            checkout,
+            "1.0.2",
+            undefined,
+            serverSource.replace('"managed"', '"local"'),
+          );
+          if (!enabled) await service.setEnabled("updater", false);
+
+          expect(await service.installPath(checkout)).toMatchObject({
+            id: "updater",
+            source: `path:${checkout}`,
+            enabled,
+            status: enabled ? "running" : "disabled",
+          });
+          expect(getInstalledPlugin(db, "updater")).toMatchObject({
+            provenance: "direct",
+            sourceKind: "path",
+            catalogEntryId: null,
+            catalogMarketplaceName: null,
+            sourcePath: checkout,
+            activeArtifactId: null,
+            enabled,
+          });
+          expect(listPluginSchedules(db, "updater")).toEqual([
+            expect.objectContaining({
+              name: "sweep",
+              cron: "0 * * * *",
+              lastStatus: "ok",
+            }),
+          ]);
+          if (!enabled) await service.setEnabled("updater", true);
+          expect((await service.getSettings("updater"))?.values).toEqual({
+            floor: "1",
+            token: { set: true },
+          });
+          const api = service.getApi("updater");
+          if (api === undefined) throw new Error("local plugin did not load");
+          expect(
+            api.storage.database().prepare("SELECT value FROM retained").get(),
+          ).toEqual({ value: "saved recap" });
+          expect(await api.storage.kv.get("cursor")).toBe("retained cursor");
+          expect(
+            (globalThis as Record<string, unknown>).__managedSwitchVersion,
+          ).toBe("local");
+        },
+      );
+
+      it("restores the Git registration and running plugin after failed local activation", async () => {
+        const previous = getInstalledPlugin(db, "updater");
+        const checkout = join(workDir, "broken-local");
+        await cp(repo, checkout, { recursive: true });
+        await commitPlugin(
+          checkout,
+          "1.0.2",
+          undefined,
+          `export default function plugin() { throw new Error("local activation failed"); }`,
+        );
+
+        await expect(service.installPath(checkout)).rejects.toThrow(
+          /failed to start.*local activation failed.*was kept/,
+        );
+
+        expect(getInstalledPlugin(db, "updater")).toMatchObject({
+          source: previous?.source,
+          provenance,
+          catalogEntryId: provenance === "catalog" ? "updater" : null,
+          catalogMarketplaceName:
+            provenance === "catalog" ? "acme-plugins" : null,
+          sourceKind: "git",
+          gitResolvedCommit: previous?.gitResolvedCommit,
+          activeArtifactId: previous?.activeArtifactId,
+          rootDir: previous?.rootDir,
+          version: "1.0.1",
+          enabled: true,
+        });
+        expect(
+          service.list().find((plugin) => plugin.id === "updater"),
+        ).toMatchObject({ status: "running", version: "1.0.1" });
+        expect((await service.getSettings("updater"))?.values).toEqual({
+          floor: "1",
+          token: { set: true },
+        });
+        expect(listPluginSchedules(db, "updater")).toEqual([
+          expect.objectContaining({
+            name: "sweep",
+            cron: "0 * * * *",
+            lastStatus: "ok",
+          }),
+        ]);
+        const api = service.getApi("updater");
+        if (api === undefined)
+          throw new Error("managed plugin was not restored");
+        expect(
+          api.storage.database().prepare("SELECT value FROM retained").get(),
+        ).toEqual({ value: "saved recap" });
+        expect(await api.storage.kv.get("cursor")).toBe("retained cursor");
+        expect(
+          (globalThis as Record<string, unknown>).__managedSwitchVersion,
+        ).toBe("managed");
+      });
+    },
+  );
 
   it("keeps a multi-plugin check usable when one npm registry is offline", async () => {
     const updateState = {
