@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { turnScope } from "@bb/domain";
 import { getLastThreadOutput } from "../../src/services/threads/thread-data.js";
+import { getLastProviderThreadId } from "../../src/services/threads/thread-events.js";
 import { stopThreadForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
 import { reportQueuedCommandSuccess } from "../helpers/commands.js";
 import { waitForQueuedCommand } from "../helpers/commands.js";
@@ -76,6 +77,74 @@ for (const lifetime of [undefined, "disposable"] as const) {
     });
   });
 }
+
+it("creates a disposable child under a persistent parent without forking", async () => {
+  await withTestHarness(async (harness) => {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const environment = seedEnvironment(harness.deps, {
+      hostId: host.id,
+      projectId: project.id,
+    });
+    const parent = seedThread(harness.deps, {
+      projectId: project.id,
+      environmentId: environment.id,
+      providerSessionLifetime: "persistent",
+    });
+    const parentProviderThreadId = "persistent-parent-uuid";
+    seedThreadRuntimeState(harness.deps, {
+      threadId: parent.id,
+      environmentId: environment.id,
+      providerThreadId: parentProviderThreadId,
+    });
+    const response = await harness.app.request("/api/v1/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        origin: "cli",
+        projectId: project.id,
+        parentThreadId: parent.id,
+        providerId: "codex",
+        model: "gpt-5",
+        experimental_providerSessionLifetime: "disposable",
+        input: [{ type: "text", text: "temporary child worker" }],
+        environment: { type: "reuse", environmentId: environment.id },
+      }),
+    });
+    expect(response.status).toBe(201);
+    const child = z
+      .looseObject({ id: z.string() })
+      .parse(await readJson(response));
+    expect(child).toMatchObject({
+      parentThreadId: parent.id,
+      canEditMessages: false,
+      experimental_providerSessionLifetime: "disposable",
+    });
+    expect(getThread(harness.db, child.id)).toMatchObject({
+      parentThreadId: parent.id,
+      sourceThreadId: null,
+      originKind: null,
+      providerSessionLifetime: "disposable",
+    });
+    const start = await waitForQueuedCommand(
+      harness,
+      ({ command }) =>
+        command.type === "thread.start" && command.threadId === child.id,
+    );
+    expect(start.command).toMatchObject({
+      providerSessionLifetime: "disposable",
+    });
+    expect(start.command).not.toHaveProperty("fork");
+    expect(getThread(harness.db, parent.id)).toMatchObject({
+      providerSessionLifetime: "persistent",
+    });
+    expect(getLastProviderThreadId(harness.deps, parent.id)).toBe(
+      parentProviderThreadId,
+    );
+  });
+});
 
 describe("unsupported disposable provider", () => {
   it("rejects before creating a BB thread or dispatching work", async () => {
