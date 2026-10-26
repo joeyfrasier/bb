@@ -20,6 +20,7 @@ import {
 } from "drizzle-orm";
 import type {
   JsonObject,
+  ProviderSessionLifetime,
   ReasoningLevel,
   ThreadChangeKind,
   ThreadLifecycleEvent,
@@ -262,6 +263,7 @@ function upsertThreadTitleSearchSegments(
 }
 
 export interface CreateThreadInput {
+  providerSessionLifetime?: ProviderSessionLifetime;
   projectId: string;
   environmentId?: string | null;
   providerId: string;
@@ -324,6 +326,7 @@ export function createThread(
           projectId: input.projectId,
           environmentId: input.environmentId ?? null,
           providerId: input.providerId,
+          providerSessionLifetime: input.providerSessionLifetime,
           title: input.title ?? null,
           titleFallback: input.titleFallback ?? null,
           sectionId: input.sectionId ?? null,
@@ -400,6 +403,23 @@ const prepareGetThread = (db: DbQueryConnection) =>
 
 export function getThread(db: ThreadWriteConnection, id: string) {
   return prepareCachedQuery(db, prepareGetThread).get({ id }) ?? null;
+}
+
+const prepareGetThreadProviderSessionLifetime = (db: DbQueryConnection) =>
+  db
+    .select({ providerSessionLifetime: threads.providerSessionLifetime })
+    .from(threads)
+    .where(eq(threads.id, placeholder("id")))
+    .prepare();
+
+export function getThreadProviderSessionLifetime(
+  db: ThreadWriteConnection,
+  id: string,
+): ProviderSessionLifetime | null {
+  return (
+    prepareCachedQuery(db, prepareGetThreadProviderSessionLifetime).get({ id })
+      ?.providerSessionLifetime ?? null
+  );
 }
 
 export interface ThreadMentionRow {

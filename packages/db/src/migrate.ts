@@ -1194,6 +1194,157 @@ function stageQueuedMessageGroups(
   );
 }
 
+const STAGED_PROVIDER_SESSION_LIFETIME_COLUMN =
+  "_bb_provider_session_lifetime_pending";
+const PROVIDER_SESSION_LIFETIME_MIGRATION = "0147_provider_session_lifetime";
+const LEGACY_PROVIDER_SESSION_LIFETIME_WHEN = 1792516479961;
+const LEGACY_PROVIDER_SESSION_LIFETIME_HASH =
+  "ffbfda049fa822139caa89d097a2eb89858f04c7983af24bc43dd4db1d945305";
+
+function validateProviderSessionLifetimeUpgrade(
+  db: DbConnection,
+  migrationsFolder: string,
+): void {
+  if (!tableExists(db, "threads")) return;
+  const current = columnExists(db, "threads", "provider_session_lifetime");
+  const staged = columnExists(
+    db,
+    "threads",
+    STAGED_PROVIDER_SESSION_LIFETIME_COLUMN,
+  );
+  const migration = requireExpectedAppliedMigration(
+    readExpectedAppliedMigrations(migrationsFolder),
+    PROVIDER_SESSION_LIFETIME_MIGRATION,
+  );
+  const applied = readAppliedMigrationCreatedAts(db).has(migration.createdAt);
+  if (applied && !staged) return;
+  if (!tableExists(db, "__drizzle_migrations")) {
+    if (current || staged)
+      throw new Error("Invalid provider session lifetime upgrade state");
+    return;
+  }
+  const legacy = db.$client
+    .prepare<[number], AppliedMigrationIdentityRow>(
+      "SELECT hash, created_at AS createdAt FROM __drizzle_migrations WHERE created_at = ?",
+    )
+    .get(LEGACY_PROVIDER_SESSION_LIFETIME_WHEN);
+  if (!legacy && !current && !staged) return;
+  if (
+    !legacy ||
+    legacy.hash !== LEGACY_PROVIDER_SESSION_LIFETIME_HASH ||
+    (!current && !staged)
+  )
+    throw new Error("Invalid legacy provider session lifetime migration");
+  const stock = requireExpectedAppliedMigration(
+    readExpectedAppliedMigrations(migrationsFolder),
+    "0146_diff_viewed_files",
+  );
+  const stockRow = db.$client
+    .prepare<[number], AppliedMigrationIdentityRow>(
+      "SELECT hash, created_at AS createdAt FROM __drizzle_migrations WHERE created_at = ?",
+    )
+    .get(stock.createdAt);
+  const expectedColumns = [
+    { name: "environment_id", type: "text", notNull: true, primaryKey: true },
+    { name: "target_key", type: "text", notNull: true, primaryKey: true },
+    { name: "path", type: "text", notNull: true, primaryKey: true },
+    { name: "revision", type: "text", notNull: true, primaryKey: false },
+    { name: "updated_at", type: "integer", notNull: true, primaryKey: false },
+  ];
+  const stockColumns = getTableInfo(db, "diff_viewed_files");
+  const stockForeignKeys = getForeignKeys(db, "diff_viewed_files");
+  const stockIndexes = getIndexes(db, "diff_viewed_files");
+  if (
+    stockRow?.hash !== stock.hash ||
+    JSON.stringify(stockColumns) !== JSON.stringify(expectedColumns) ||
+    stockForeignKeys.length !== 1 ||
+    stockForeignKeys[0].table !== "environments" ||
+    stockForeignKeys[0].from !== "environment_id" ||
+    stockForeignKeys[0].to !== "id" ||
+    stockForeignKeys[0].onUpdate !== "NO ACTION" ||
+    stockForeignKeys[0].onDelete !== "CASCADE" ||
+    stockIndexes.length !== 1 ||
+    !stockIndexes[0].unique ||
+    JSON.stringify(getIndexColumnNames(db, stockIndexes[0].name)) !==
+      JSON.stringify(["environment_id", "target_key", "path"])
+  )
+    throw new Error(
+      "Disposable-session upgrade requires the stock 0146_diff_viewed_files migration and schema",
+    );
+  if (current && staged && !applied)
+    throw new Error(
+      "Invalid ambiguous provider session lifetime migration state",
+    );
+  for (const name of [
+    "provider_session_lifetime",
+    STAGED_PROVIDER_SESSION_LIFETIME_COLUMN,
+  ]) {
+    if (!columnExists(db, "threads", name)) continue;
+    const column = getTableInfo(db, "threads").find(
+      (candidate) => candidate.name === name,
+    );
+    if (
+      !column ||
+      column.type !== "text" ||
+      !column.notNull ||
+      column.primaryKey
+    )
+      throw new Error("Invalid provider session lifetime column");
+    if (
+      db.$client
+        .prepare(
+          `SELECT 1 FROM threads WHERE ${name} IS NULL OR ${name} NOT IN ('persistent', 'disposable') LIMIT 1`,
+        )
+        .get()
+    )
+      throw new Error("Invalid provider session lifetime value");
+  }
+  if (
+    current &&
+    staged &&
+    db.$client
+      .prepare(
+        `SELECT 1 FROM threads WHERE provider_session_lifetime != 'persistent' AND provider_session_lifetime != ${STAGED_PROVIDER_SESSION_LIFETIME_COLUMN} LIMIT 1`,
+      )
+      .get()
+  )
+    throw new Error(
+      "Invalid conflicting provider session lifetime recovery values",
+    );
+}
+
+function stageExistingProviderSessionLifetimeColumn(
+  db: DbConnection,
+  migrationsFolder: string,
+): boolean {
+  if (columnExists(db, "threads", STAGED_PROVIDER_SESSION_LIFETIME_COLUMN))
+    return true;
+  if (!columnExists(db, "threads", "provider_session_lifetime")) return false;
+  const migration = requireExpectedAppliedMigration(
+    readExpectedAppliedMigrations(migrationsFolder),
+    PROVIDER_SESSION_LIFETIME_MIGRATION,
+  );
+  if (readAppliedMigrationCreatedAts(db).has(migration.createdAt)) return false;
+  db.$client.exec(
+    `ALTER TABLE threads RENAME COLUMN provider_session_lifetime TO ${STAGED_PROVIDER_SESSION_LIFETIME_COLUMN}`,
+  );
+  return true;
+}
+
+function restoreStagedProviderSessionLifetimeColumn(db: DbConnection): void {
+  if (!columnExists(db, "threads", STAGED_PROVIDER_SESSION_LIFETIME_COLUMN))
+    return;
+  if (!columnExists(db, "threads", "provider_session_lifetime")) {
+    db.$client.exec(
+      `ALTER TABLE threads RENAME COLUMN ${STAGED_PROVIDER_SESSION_LIFETIME_COLUMN} TO provider_session_lifetime`,
+    );
+    return;
+  }
+  db.$client
+    .exec(`UPDATE threads SET provider_session_lifetime = ${STAGED_PROVIDER_SESSION_LIFETIME_COLUMN};
+    ALTER TABLE threads DROP COLUMN ${STAGED_PROVIDER_SESSION_LIFETIME_COLUMN};`);
+}
+
 const STAGED_CONNECT_MACHINE_ID_COLUMN = "_bb_connect_machine_id_pending";
 const STAGED_THREAD_STORAGE_DELETED_AT_COLUMN =
   "_bb_thread_storage_deleted_at_pending";
@@ -1412,6 +1563,7 @@ function validateAppliedMigrationHistory(
 export function migrate(db: DbConnection, options: MigrateOptions = {}): void {
   const migrationsFolder = resolveMigrationsFolder();
   const sqlite = db.$client;
+  validateProviderSessionLifetimeUpgrade(db, migrationsFolder);
 
   const existingInstallation =
     tableExists(db, "__drizzle_migrations") &&
@@ -1453,9 +1605,14 @@ export function migrate(db: DbConnection, options: MigrateOptions = {}): void {
     );
     const stagedThreadStorageDeletedAt =
       stageExistingThreadStorageDeletedAtColumn(db, migrationsFolder);
+    let stagedProviderSessionLifetime = false;
     try {
+      stagedProviderSessionLifetime =
+        stageExistingProviderSessionLifetimeColumn(db, migrationsFolder);
       drizzleMigrate(db, { migrationsFolder });
     } finally {
+      if (stagedProviderSessionLifetime)
+        restoreStagedProviderSessionLifetimeColumn(db);
       if (stagedConnectMachineId) restoreStagedConnectMachineIdColumn(db);
       if (stagedThreadStorageDeletedAt)
         restoreStagedThreadStorageDeletedAtColumn(db);

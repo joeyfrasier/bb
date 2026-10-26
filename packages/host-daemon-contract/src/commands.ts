@@ -19,6 +19,7 @@ import {
   permissionModeSchema,
   promptInputSchema,
   providerForkSchema,
+  providerSessionLifetimeSchema,
   threadGitDiffResponseSchema,
   runtimeThreadExecutionOptionsSchema,
   rawDiffFileStatSchema,
@@ -222,6 +223,7 @@ export type HostDaemonContributedEnvEntry = z.infer<
 
 const hostDaemonThreadRuntimeContextSchema = z
   .object({
+    providerSessionLifetime: providerSessionLifetimeSchema,
     workspaceContext: workspaceContextSchema,
     projectId: z.string().min(1),
     providerId: z.string().min(1),

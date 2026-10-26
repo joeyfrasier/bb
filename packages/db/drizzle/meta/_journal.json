@@ -1030,6 +1030,13 @@
       "when": 1792453324528,
       "tag": "0146_diff_viewed_files",
       "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "6",
+      "when": 1793047889799,
+      "tag": "0147_provider_session_lifetime",
+      "breakpoints": true
     }
   ]
 }

@@ -236,6 +236,7 @@ export interface ThreadSpawnBaseArgs extends Omit<
   CreateThreadRequest,
   "input" | "origin" | "originKind" | "startedOnBehalfOf"
 > {
+  experimental_providerSessionLifetime?: CreateThreadRequest["experimental_providerSessionLifetime"];
   origin?: CreateThreadRequest["origin"];
   originKind?: CreateThreadRequest["originKind"];
   startedOnBehalfOf?: CreateThreadRequest["startedOnBehalfOf"];

@@ -13,6 +13,7 @@ import {
   threadTimelineSubscriptionTargetSchema,
   permissionModeInputSchema,
   promptInputSchema,
+  providerSessionLifetimeSchema,
   clientTurnRequestIdSchema,
   queuedMessageWaitHolderSchema,
   queuedMessageWaitingOnSchema,
@@ -128,6 +129,8 @@ export type ExistingThreadExecutionInputSources = z.infer<
 
 export const createThreadRequestSchema = z
   .object({
+    experimental_providerSessionLifetime:
+      providerSessionLifetimeSchema.optional(),
     projectId: z.string().min(1),
     providerId: z.string().min(1).optional(),
     origin: threadCreateOriginSchema,
