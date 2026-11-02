@@ -794,6 +794,51 @@ describe.concurrent("worktree host entry", () => {
     await harness.experimental_dispose();
   });
 
+  it("removes completed rebase history without treating it as an active operation", async ({
+    onTestFinished,
+  }) => {
+    const { sourcePath, dataDir } =
+      await createSourceRepository(onTestFinished);
+    const harness = createHarness(dataDir);
+    const created = await harness.experimental_call(
+      "create",
+      createInput({
+        operationId: "create-completed-rebase",
+        sourcePath,
+        pathKey: "completed-rebase",
+        branchName: "bb/completed-rebase",
+      }),
+    );
+    if (created.status !== "created") throw new Error(created.message);
+    await writeFile(join(created.path, "README.md"), "task edit\n");
+    await git(created.path, "commit", "-am", "task edit");
+    await writeFile(join(sourcePath, "README.md"), "base edit\n");
+    await git(sourcePath, "commit", "-am", "base edit");
+    await expect(git(created.path, "rebase", "main")).rejects.toThrow();
+    await writeFile(join(created.path, "README.md"), "resolved edit\n");
+    await git(created.path, "add", "README.md");
+    await git(created.path, "-c", "core.editor=true", "rebase", "--continue");
+    const gitDir = (
+      await git(created.path, "rev-parse", "--absolute-git-dir")
+    ).trim();
+    if (!existsSync(join(gitDir, "REBASE_HEAD"))) {
+      await git(created.path, "update-ref", "REBASE_HEAD", "HEAD");
+    }
+    expect(existsSync(join(gitDir, "rebase-merge"))).toBe(false);
+    expect((await git(created.path, "status", "--porcelain")).trim()).toBe("");
+    const removed = await harness.experimental_call("remove", {
+      operationId: "remove-completed-rebase",
+      pathKey: "completed-rebase",
+      path: created.path,
+    });
+    expect(removed).toEqual({ status: "removed" });
+    expect(existsSync(created.path)).toBe(false);
+    expect(await git(sourcePath, "show", "bb/completed-rebase:README.md")).toBe(
+      "resolved edit\n",
+    );
+    await harness.experimental_dispose();
+  });
+
   it("preserves detached commits without a retained local branch", async ({
     onTestFinished,
   }) => {

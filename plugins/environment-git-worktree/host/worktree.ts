@@ -752,7 +752,6 @@ async function inspectRemovableWorktree(
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
     "REVERT_HEAD",
-    "REBASE_HEAD",
     "rebase-merge",
     "rebase-apply",
     "sequencer",
