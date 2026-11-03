@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -5,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 interface Tombstone {
   root: string;
   generation: string;
+  phase: "provisioning" | "retiring";
 }
 const coordinators = new Map<string, WorkspaceMutationAdmission>();
 
@@ -20,6 +22,16 @@ export function workspaceMutationAdmission(
     coordinators.set(key, value);
   }
   return value;
+}
+
+export function admitWorkspaceMutation<T>(
+  dataDir: string,
+  paths: string[],
+  run: () => Promise<T>,
+): Promise<T> {
+  return constants.O_NOFOLLOW
+    ? workspaceMutationAdmission(dataDir).mutate(paths, run)
+    : run();
 }
 
 export async function canonicalMutationPath(value: string): Promise<string> {
@@ -94,7 +106,9 @@ export class WorkspaceMutationAdmission {
         typeof value.root !== "string" ||
         !path.isAbsolute(value.root) ||
         !("generation" in value) ||
-        typeof value.generation !== "string"
+        typeof value.generation !== "string" ||
+        !("phase" in value) ||
+        (value.phase !== "provisioning" && value.phase !== "retiring")
       )
         throw new Error("WORKSPACE_FENCE_STORAGE_INVALID");
       if (this.file(value.root) !== file)
@@ -102,6 +116,7 @@ export class WorkspaceMutationAdmission {
       this.blocked.set(value.root, {
         root: value.root,
         generation: value.generation,
+        phase: value.phase,
       });
     }
   }
@@ -133,7 +148,13 @@ export class WorkspaceMutationAdmission {
         prior.generation !== record.generation
       )
         throw new Error("WORKSPACE_GENERATION_CHANGED");
-      return;
+      if (
+        !("phase" in prior) ||
+        (prior.phase !== "provisioning" && prior.phase !== "retiring") ||
+        (prior.phase === "retiring" && record.phase !== "retiring")
+      )
+        throw new Error("WORKSPACE_GENERATION_RETIRED");
+      if (prior.phase === record.phase) return;
     } catch (error) {
       if (
         !(error instanceof Error && "code" in error && error.code === "ENOENT")
@@ -177,8 +198,14 @@ export class WorkspaceMutationAdmission {
     const done = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const predecessors = [...this.writes.values()]
+      .filter((write) =>
+        write.paths.some((a) => canonical.some((b) => overlaps(a, b))),
+      )
+      .map((write) => write.done);
     this.writes.set(id, { paths: canonical, done });
     try {
+      await Promise.all(predecessors);
       return await run();
     } finally {
       this.writes.delete(id);
@@ -196,6 +223,8 @@ export class WorkspaceMutationAdmission {
     const root = await canonicalMutationPath(rootPath);
     if (this.running.has(root)) throw new Error("WORKSPACE_RETIREMENT_BUSY");
     const prior = this.blocked.get(root);
+    if (prior && !permanent && prior.phase === "retiring")
+      throw new Error("WORKSPACE_GENERATION_RETIRED");
     if (prior && prior.generation !== generation)
       throw new Error("WORKSPACE_GENERATION_CHANGED");
     if (
@@ -205,9 +234,14 @@ export class WorkspaceMutationAdmission {
     )
       throw new Error("WORKSPACE_RETIRING");
     this.running.add(root);
-    this.blocked.set(root, { root, generation });
+    const record: Tombstone = {
+      root,
+      generation,
+      phase: permanent ? "retiring" : "provisioning",
+    };
+    this.blocked.set(root, record);
     try {
-      await this.persist({ root, generation });
+      await this.persist(record);
       signal?.throwIfAborted();
       const draining = Promise.all(
         [...this.writes.values()]

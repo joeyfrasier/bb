@@ -1,3 +1,5 @@
+import { findWorktreeForBranch } from "bb-environment-provider-host/git";
+import { constants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import {
@@ -18,6 +20,15 @@ import { PluginHostManager } from "./plugin-host-manager.js";
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return { ...actual, rm: vi.fn(actual.rm) };
+});
+
+vi.mock("bb-environment-provider-host/git", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("bb-environment-provider-host/git")>();
+  return {
+    ...actual,
+    findWorktreeForBranch: vi.fn(actual.findWorktreeForBranch),
+  };
 });
 
 async function* artifactBody(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
@@ -209,56 +220,107 @@ describe("PluginHostManager", () => {
     return { dataDir, manager };
   }
 
-  it("injects native admission independently of worker input", async () => {
-    const { dataDir, manager } = await createManagerFixture();
-    const root = join(
-      dataDir,
-      "plugins/environment-git-worktree/host-data/worktrees/synthetic/repo",
-    );
-    await fs.mkdir(root, { recursive: true });
-    const result = await manager.call(
-      callCommand({
+  it.runIf(Boolean(constants.O_NOFOLLOW))(
+    "cancels before dispatch while branch-holder preflight is pending",
+    async () => {
+      const fetching = vi.fn(async () => artifactBody(artifactSource));
+      const { manager } = await createManagerFixture({
+        fetchArtifact: fetching,
+      });
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      vi.mocked(findWorktreeForBranch).mockImplementationOnce(async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return null;
+      });
+      const command = callCommand({
         pluginId: "environment-git-worktree",
-        method: "remove",
+        method: "create",
         input: {
           preservationVersion: 1,
           pathKey: "synthetic",
-          path: root,
-          workspaceFence: { root: "/forged", generation: "forged" },
+          sourcePath: "/synthetic/source",
+          branchName: "synthetic-branch",
         },
-      }),
-    );
-    expect(result.output).toEqual({
-      status: "removed",
-      version: 1,
-      fence: { version: 1, root, generation: "synthetic" },
-    });
-  });
+      });
+      const pending = manager.call(command);
+      await started;
+      expect(
+        manager.cancel({
+          type: "plugin.host.cancel",
+          pluginId: command.pluginId,
+          generation: command.generation,
+          callId: command.callId,
+        }),
+      ).toEqual({ cancelled: true });
+      release();
+      await expect(pending).rejects.toThrow();
+      expect(fetching).not.toHaveBeenCalled();
+    },
+  );
 
-  it("refuses symlink descendants escaping the owned attempt root", async () => {
-    const { dataDir, manager } = await createManagerFixture();
-    const attempt = join(
-      dataDir,
-      "plugins/environment-git-worktree/host-data/worktrees/synthetic",
-    );
-    const outside = join(dataDir, "unowned");
-    await fs.mkdir(attempt, { recursive: true });
-    await fs.mkdir(outside);
-    await fs.symlink(outside, join(attempt, "alias"));
-    await expect(
-      manager.call(
+  it.runIf(Boolean(constants.O_NOFOLLOW))(
+    "injects native admission independently of worker input",
+    async () => {
+      const { dataDir, manager } = await createManagerFixture();
+      const root = join(
+        dataDir,
+        "plugins/environment-git-worktree/host-data/worktrees/synthetic/repo",
+      );
+      await fs.mkdir(root, { recursive: true });
+      const result = await manager.call(
         callCommand({
           pluginId: "environment-git-worktree",
           method: "remove",
           input: {
             preservationVersion: 1,
             pathKey: "synthetic",
-            path: join(attempt, "alias"),
+            path: root,
+            workspaceFence: { root: "/forged", generation: "forged" },
           },
         }),
-      ),
-    ).rejects.toThrow("WORKSPACE_PATH_UNOWNED");
-  });
+      );
+      expect(result.output).toEqual({
+        status: "removed",
+        version: 1,
+        fence: { version: 1, root, generation: "synthetic" },
+      });
+    },
+  );
+
+  it.runIf(Boolean(constants.O_NOFOLLOW))(
+    "refuses symlink descendants escaping the owned attempt root",
+    async () => {
+      const { dataDir, manager } = await createManagerFixture();
+      const attempt = join(
+        dataDir,
+        "plugins/environment-git-worktree/host-data/worktrees/synthetic",
+      );
+      const outside = join(dataDir, "unowned");
+      await fs.mkdir(attempt, { recursive: true });
+      await fs.mkdir(outside);
+      await fs.symlink(outside, join(attempt, "alias"));
+      await expect(
+        manager.call(
+          callCommand({
+            pluginId: "environment-git-worktree",
+            method: "remove",
+            input: {
+              preservationVersion: 1,
+              pathKey: "synthetic",
+              path: join(attempt, "alias"),
+            },
+          }),
+        ),
+      ).rejects.toThrow("WORKSPACE_PATH_UNOWNED");
+    },
+  );
 
   it("rejects old provider lifecycle calls without a preservation contract", async () => {
     const manager = await createManager();

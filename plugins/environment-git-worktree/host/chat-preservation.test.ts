@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { constants, existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,12 +21,22 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
 });
 
-describe("chat preservation", () => {
-  it("does not create a snapshot store for a workspace without BB files", async () => {
+it("does not create a snapshot store for a workspace without BB files", async () => {
     const f = await fixture();
     expect(await preserveChatData(f)).toEqual({ status: "empty", fileCount: 0, byteCount: 0 });
     expect(existsSync(f.storagePath)).toBe(false);
-  });
+});
+
+it.skipIf(Boolean(constants.O_NOFOLLOW))("refuses BB capture when no-follow primitives are unavailable", async () => {
+  const f = await fixture();
+  await fs.mkdir(f.chat);
+  await fs.writeFile(path.join(f.chat, "artifact"), "synthetic private data");
+  await expect(preserveChatData(f)).rejects.toMatchObject({ code: "chat_preservation_unsafe" });
+  expect(existsSync(f.storagePath)).toBe(false);
+  expect(await fs.readFile(path.join(f.chat, "artifact"), "utf8")).toBe("synthetic private data");
+});
+
+describe.skipIf(!constants.O_NOFOLLOW)("chat preservation", () => {
 
   it("restores all file bytes and empty directories after the source workspace is gone", async () => {
     const f = await fixture();

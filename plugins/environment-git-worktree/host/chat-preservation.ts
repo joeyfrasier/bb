@@ -165,7 +165,7 @@ export async function preserveChatData(args: {
   let staging: string | undefined;
   try {
     args.signal?.throwIfAborted();
-    if (!constants.O_NOFOLLOW || !path.isAbsolute(args.workspacePath) || !path.isAbsolute(args.storagePath)) {
+    if (!path.isAbsolute(args.workspacePath) || !path.isAbsolute(args.storagePath)) {
       throw new ChatPreservationError("chat_preservation_unsafe");
     }
     const workspace = await fs.realpath(args.workspacePath);
@@ -179,6 +179,7 @@ export async function preserveChatData(args: {
       }
       throw error;
     }
+    if (!constants.O_NOFOLLOW) throw new ChatPreservationError("chat_preservation_unsafe");
     const entries = await inventory(source, args.signal);
     const storage = path.resolve(args.storagePath);
     if (within(workspace, storage) || within(storage, workspace)) {

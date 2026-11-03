@@ -115,6 +115,7 @@ export interface ExperimentalHostRpcContext<
   readonly internal_DO_NOT_USE_workspaceFence?: {
     readonly version: 1;
     readonly root: string;
+    readonly additionalRoots?: readonly string[];
     readonly generation: string;
   } | null;
   /** Native daemon admission protocol supported by this worker. */

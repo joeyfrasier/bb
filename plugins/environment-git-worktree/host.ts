@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import nodePath from "node:path";
 import { realpath } from "node:fs/promises";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
@@ -52,7 +53,10 @@ export function createWorktreeHostEntry() {
     experimental_signals: worktreeHostSignals,
     handlers: {
       async workspacePreservationStatus(input, context) {
-        if (context.internal_DO_NOT_USE_workspaceFenceVersion !== 1)
+        if (
+          context.internal_DO_NOT_USE_workspaceFenceVersion !== 1 ||
+          !constants.O_NOFOLLOW
+        )
           return {
             status: "unavailable",
             reason: "NATIVE_WRITER_FENCE_UNAVAILABLE",

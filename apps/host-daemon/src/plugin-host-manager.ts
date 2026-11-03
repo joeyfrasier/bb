@@ -1,3 +1,5 @@
+import { constants } from "node:fs";
+import { findWorktreeForBranch } from "bb-environment-provider-host/git";
 import {
   canonicalMutationPath,
   workspaceMutationAdmission,
@@ -263,39 +265,7 @@ export class PluginHostManager {
         value.pathKey === ".."
       )
         throw new Error("WORKSPACE_PATH_KEY_INVALID");
-      const dataDir = await ensurePluginProcessDataDir({
-        daemonDataDir: this.options.dataDir,
-        pluginId: command.pluginId,
-        kind: "host-data",
-      });
-      const attemptRoot = path.join(dataDir, "worktrees", value.pathKey);
-      const generation = value.pathKey;
-      const canonicalAttempt = await canonicalMutationPath(attemptRoot);
-      const canonicalManaged = await canonicalMutationPath(
-        path.join(dataDir, "worktrees"),
-      );
-      const ownedRelative = path.relative(canonicalManaged, canonicalAttempt);
-      if (
-        !ownedRelative ||
-        ownedRelative.startsWith("..") ||
-        path.isAbsolute(ownedRelative)
-      )
-        throw new Error("WORKSPACE_PATH_UNOWNED");
-      const root =
-        command.method === "remove" &&
-        "path" in value &&
-        typeof value.path === "string"
-          ? value.path
-          : attemptRoot;
-      if (
-        path.relative(attemptRoot, root).startsWith("..") ||
-        path.isAbsolute(path.relative(attemptRoot, root))
-      )
-        throw new Error("WORKSPACE_PATH_UNOWNED");
-      const canonicalRoot = await canonicalMutationPath(root);
-      const relative = path.relative(canonicalAttempt, canonicalRoot);
-      if (relative.startsWith("..") || path.isAbsolute(relative))
-        throw new Error("WORKSPACE_PATH_UNOWNED");
+      if (!constants.O_NOFOLLOW) return this.callWorker(command, null);
       const key = this.callKey(command);
       if (this.pendingRetirements.has(key))
         throw new Error("WORKSPACE_RETIREMENT_BUSY");
@@ -304,19 +274,98 @@ export class PluginHostManager {
       const deadline = setTimeout(() => admission.abort(), command.timeoutMs);
       deadline.unref();
       try {
+        const dataDir = await ensurePluginProcessDataDir({
+          daemonDataDir: this.options.dataDir,
+          pluginId: command.pluginId,
+          kind: "host-data",
+        });
+        const attemptRoot = path.join(dataDir, "worktrees", value.pathKey);
+        const generation = value.pathKey;
+        const canonicalAttempt = await canonicalMutationPath(attemptRoot);
+        const canonicalManaged = await canonicalMutationPath(
+          path.join(dataDir, "worktrees"),
+        );
+        const ownedRelative = path.relative(canonicalManaged, canonicalAttempt);
+        if (
+          !ownedRelative ||
+          ownedRelative.startsWith("..") ||
+          path.isAbsolute(ownedRelative)
+        )
+          throw new Error("WORKSPACE_PATH_UNOWNED");
+        const root =
+          command.method === "remove" &&
+          "path" in value &&
+          typeof value.path === "string"
+            ? value.path
+            : attemptRoot;
+        if (
+          path.relative(attemptRoot, root).startsWith("..") ||
+          path.isAbsolute(path.relative(attemptRoot, root))
+        )
+          throw new Error("WORKSPACE_PATH_UNOWNED");
+        const canonicalRoot = await canonicalMutationPath(root);
+        const relative = path.relative(canonicalAttempt, canonicalRoot);
+        if (relative.startsWith("..") || path.isAbsolute(relative))
+          throw new Error("WORKSPACE_PATH_UNOWNED");
+        let abandonedRoot: string | null = null;
+        let abandonedGeneration: string | null = null;
+        if (
+          command.method === "create" &&
+          "sourcePath" in value &&
+          typeof value.sourcePath === "string" &&
+          "branchName" in value &&
+          typeof value.branchName === "string"
+        ) {
+          const holder = await findWorktreeForBranch(
+            value.sourcePath,
+            value.branchName,
+            { timeoutMs: Math.min(command.timeoutMs, 30000) },
+          );
+          if (holder !== null) {
+            const candidate = await canonicalMutationPath(holder);
+            const relative = path.relative(canonicalManaged, candidate);
+            if (
+              relative &&
+              !relative.startsWith("..") &&
+              !path.isAbsolute(relative) &&
+              !candidate.startsWith(canonicalAttempt + path.sep)
+            ) {
+              abandonedGeneration = relative.split(path.sep)[0] ?? null;
+              abandonedRoot = abandonedGeneration
+                ? path.join(canonicalManaged, abandonedGeneration)
+                : null;
+            }
+          }
+        }
+        admission.signal.throwIfAborted();
         return await workspaceMutationAdmission(this.options.dataDir).protect(
           root,
           value.pathKey,
           command.method === "remove",
           async (canonicalRoot) => {
+            admission.signal.throwIfAborted();
             const relative = path.relative(canonicalAttempt, canonicalRoot);
             if (relative.startsWith("..") || path.isAbsolute(relative))
               throw new Error("WORKSPACE_PATH_UNOWNED");
-            const result = await this.callWorker(command, {
-              version: 1,
-              root: canonicalRoot,
-              generation,
-            });
+            const invoke = () =>
+              this.callWorker(command, {
+                version: 1,
+                root: canonicalRoot,
+                generation,
+                ...(abandonedRoot ? { additionalRoots: [abandonedRoot] } : {}),
+              });
+            const result =
+              abandonedRoot && abandonedGeneration
+                ? await workspaceMutationAdmission(
+                    this.options.dataDir,
+                  ).protect(
+                    abandonedRoot,
+                    abandonedGeneration,
+                    true,
+                    invoke,
+                    admission.signal,
+                  )
+                : await invoke();
             if (
               command.method === "create" &&
               (!result.output ||
@@ -340,6 +389,7 @@ export class PluginHostManager {
       command.method === "workspacePreservationStatus"
     ) {
       const value = command.input;
+      if (!constants.O_NOFOLLOW) return this.callWorker(command, null);
       if (
         !value ||
         typeof value !== "object" ||
@@ -360,7 +410,12 @@ export class PluginHostManager {
 
   private async callWorker(
     command: PluginHostCallCommand,
-    workspaceFence: { version: 1; root: string; generation: string } | null,
+    workspaceFence: {
+      version: 1;
+      root: string;
+      generation: string;
+      additionalRoots?: string[];
+    } | null,
   ): Promise<PluginHostCallResult> {
     if (this.shuttingDown) {
       throw new Error("host plugin manager is shutting down");
@@ -488,6 +543,8 @@ export class PluginHostManager {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    for (const controller of this.pendingRetirements.values())
+      controller.abort();
     await Promise.allSettled([...this.workerMutationTails.values()]);
     await Promise.all(
       [...this.workers.values()].map((worker) =>

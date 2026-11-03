@@ -47,7 +47,12 @@ export type BranchMode = "reset" | "reuse-existing";
 
 interface ChatProtection {
   storagePath: string;
-  fence: { version: 1; root: string; generation: string } | null;
+  fence: {
+    version: 1;
+    root: string;
+    generation: string;
+    additionalRoots?: readonly string[];
+  } | null;
 }
 
 interface CreateWorktreeArgs {
@@ -878,13 +883,20 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
   }
   const protection = args.chatProtection;
   const fence = protection?.fence;
+  const canonicalWorkspace = await realpathOrResolved(workspacePath);
+  const protectedRoots = fence
+    ? [fence.root, ...(fence.additionalRoots ?? [])]
+    : [];
   if (
     protection &&
     fence &&
-    !(
-      workspacePath === fence.root ||
-      (await isPathInside(fence.root, workspacePath))
-    )
+    !protectedRoots.some((root) => {
+      const relative = path.relative(root, canonicalWorkspace);
+      return (
+        relative === "" ||
+        (!relative.startsWith("..") && !path.isAbsolute(relative))
+      );
+    })
   )
     throw new WorkspaceError(
       "worktree_fence_unavailable",

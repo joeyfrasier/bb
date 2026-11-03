@@ -105,6 +105,7 @@ interface HostContext {
   readonly internal_DO_NOT_USE_workspaceFence: {
     version: 1;
     root: string;
+    additionalRoots?: string[];
     generation: string;
   } | null;
   readonly internal_DO_NOT_USE_workspaceFenceVersion: 1;
@@ -139,6 +140,7 @@ type ParentMessage =
       readonly workspaceFence: {
         version: 1;
         root: string;
+        additionalRoots?: string[];
         generation: string;
       } | null;
       readonly workspaceFenceVersion: 1;
@@ -286,6 +288,7 @@ function parseParentMessage(value: unknown): ParentMessage | null {
       .object({
         version: z.literal(1),
         root: z.string().min(1),
+        additionalRoots: z.array(z.string().min(1)).optional(),
         generation: z.string().min(1),
       })
       .strict()

@@ -1,4 +1,4 @@
-import { workspaceMutationAdmission } from "./workspace-mutation-admission.js";
+import { admitWorkspaceMutation } from "./workspace-mutation-admission.js";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { withVcsProcessPriority } from "@bb/process-utils";
@@ -578,16 +578,17 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
   "host.list_paths": (command, _options, signal) =>
     listHostPaths(command, signal),
   "host.mkdir": (command, options) =>
-    workspaceMutationAdmission(options.dataDir).mutate([command.path], () =>
+    admitWorkspaceMutation(options.dataDir, [command.path], () =>
       mkdirHostPath(command),
     ),
   "host.move_path": (command, options) =>
-    workspaceMutationAdmission(options.dataDir).mutate(
+    admitWorkspaceMutation(
+      options.dataDir,
       [command.sourcePath, command.destinationPath],
       () => moveHostPath(command),
     ),
   "host.remove_path": (command, options) =>
-    workspaceMutationAdmission(options.dataDir).mutate([command.path], () =>
+    admitWorkspaceMutation(options.dataDir, [command.path], () =>
       removeHostPath(command),
     ),
   "host.browse_directory": browseHostDirectory,
@@ -623,7 +624,7 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
   "host.read_file": readHostFile,
   "host.read_file_chunk": readHostFileChunk,
   "host.write_file": (command, options) =>
-    workspaceMutationAdmission(options.dataDir).mutate([command.path], () =>
+    admitWorkspaceMutation(options.dataDir, [command.path], () =>
       writeHostFile(command),
     ),
   "provider.list_models": (command, options) =>

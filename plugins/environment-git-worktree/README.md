@@ -51,3 +51,12 @@ Retirement still stops workspace processes, refuses unsafe captures, and preserv
 uncertain state. Never treat this as a universal filesystem transaction. Native
 retirement tombstones are retained after failure and restart; do not clear them
 or reuse the same generation implicitly. Snapshots have no automatic deletion.
+
+Overlapping admitted mutations serialize, so a move cannot carry a live writer
+into a retiring tree. Pending operations register before waiting for their
+predecessors, and retirement drains the resulting dependency chain. A retiring
+tombstone can never be cleared by a provision retry using the same generation.
+Failed provision tombstones remain separately retryable. Creation recovery
+preflights the existing managed branch holder and acquires native admission for
+both that holder and the new attempt; the worker refuses a holder that changes
+to an unprotected path after preflight.
