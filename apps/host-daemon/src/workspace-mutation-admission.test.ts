@@ -1,3 +1,4 @@
+import { moveHostPath } from "./command-handlers/path-mutations.js";
 import { writeHostFile } from "./command-handlers/file-write.js";
 import { constants } from "node:fs";
 import fs from "node:fs/promises";
@@ -320,6 +321,104 @@ describe.runIf(Boolean(constants.O_NOFOLLOW))(
       } finally {
         release?.();
         spy?.mockRestore();
+        await rm(f.base, { recursive: true, force: true });
+      }
+    });
+
+    it("holds intermediate alias-chain moves until an admitted actual handler finishes", async () => {
+      const f = await fixture();
+      const jobs: Promise<unknown>[] = [];
+      let release!: () => void;
+      let spy: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        const a = path.join(f.base, "A");
+        const middle = path.join(f.base, "middle");
+        const replacement = path.join(f.base, "replacement");
+        const old = path.join(f.base, "old");
+        const front = path.join(f.base, "front");
+        for (const dir of [a, middle, replacement]) await mkdir(dir);
+        await writeFile(path.join(a, "note"), "old-A");
+        await writeFile(path.join(f.root, "note"), "old-B");
+        await fs.symlink(a, path.join(middle, "link"));
+        await fs.symlink(f.root, path.join(replacement, "link"));
+        await fs.symlink(path.join(middle, "link"), front);
+        const target = path.join(front, "note");
+        let entered!: () => void;
+        const paused = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        let resolved!: () => void;
+        const scopesReady = new Promise<void>((resolve) => {
+          resolved = resolve;
+        });
+        let targetCalls = 0;
+        let middleCalls = 0;
+        let baseCalls = 0;
+        const actual = fs.realpath;
+        spy = vi
+          .spyOn(fs, "realpath")
+          .mockImplementation(
+            async (...args: Parameters<typeof fs.realpath>) => {
+              const name = String(args[0]);
+              if (name === target && ++targetCalls === 3) {
+                entered();
+                await new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+              }
+              const result = await actual(...args);
+              if (name === middle) middleCalls++;
+              if (name === f.base) baseCalls++;
+              if (middleCalls >= 1 && baseCalls >= 1) resolved();
+              return result;
+            },
+          );
+        const writing = f.admission.mutate([target], () =>
+          writeHostFile({
+            type: "host.write_file",
+            path: target,
+            content: "latest-A",
+            contentEncoding: "utf8",
+            createParents: true,
+          }),
+        );
+        jobs.push(writing);
+        await paused;
+        let moveEntered = false;
+        const first = f.admission.mutate([middle, old], async () => {
+          moveEntered = true;
+          return moveHostPath({
+            type: "host.move_path",
+            sourcePath: middle,
+            destinationPath: old,
+          });
+        });
+        const second = first.then(() =>
+          f.admission.mutate([replacement, middle], () =>
+            moveHostPath({
+              type: "host.move_path",
+              sourcePath: replacement,
+              destinationPath: middle,
+            }),
+          ),
+        );
+        jobs.push(first, second);
+        await scopesReady;
+        await nextTurn();
+        await f.admission.protect(f.root, "generation", true, async () => {
+          expect(moveEntered).toBe(false);
+          release();
+          await writing;
+          expect(await readFile(path.join(f.root, "note"), "utf8")).toBe(
+            "old-B",
+          );
+        });
+        await Promise.all([first, second]);
+        expect(await readFile(path.join(a, "note"), "utf8")).toBe("latest-A");
+      } finally {
+        release?.();
+        spy?.mockRestore();
+        await Promise.allSettled(jobs);
         await rm(f.base, { recursive: true, force: true });
       }
     });

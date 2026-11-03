@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -53,6 +53,56 @@ export async function canonicalMutationPath(value: string): Promise<string> {
     }
   }
 }
+async function mutationPathTrace(
+  value: string,
+): Promise<{ canonical: string; scopes: string[] }> {
+  if (!path.isAbsolute(value)) throw new Error("WORKSPACE_PATH_INVALID");
+  const absolute = path.resolve(value);
+  let root = path.parse(absolute).root;
+  let resolved = root;
+  let pending = absolute.slice(root.length).split(path.sep).filter(Boolean);
+  const scopes = new Set<string>([absolute]);
+  let links = 0;
+  while (pending.length) {
+    const segment = pending.shift()!;
+    if (segment === ".") continue;
+    if (segment === "..") {
+      resolved = path.dirname(resolved);
+      continue;
+    }
+    const candidate = path.join(resolved, segment);
+    let info: Stats;
+    try {
+      info = await fs.lstat(candidate);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT")
+        break;
+      throw new Error("WORKSPACE_PATH_UNVERIFIED");
+    }
+    if (info.isSymbolicLink()) {
+      if (++links > 40) throw new Error("WORKSPACE_PATH_UNVERIFIED");
+      scopes.add(candidate);
+      let target: string;
+      try {
+        target = await fs.readlink(candidate);
+      } catch {
+        throw new Error("WORKSPACE_PATH_UNVERIFIED");
+      }
+      if (path.isAbsolute(target)) {
+        root = path.parse(target).root;
+        resolved = root;
+        target = target.slice(root.length);
+      }
+      pending = [...target.split(path.sep).filter(Boolean), ...pending];
+    } else {
+      resolved = candidate;
+    }
+  }
+  const canonical = await canonicalMutationPath(value);
+  scopes.add(canonical);
+  return { canonical, scopes: [...scopes].sort() };
+}
+
 function contains(a: string, b: string): boolean {
   const relative = path.relative(a, b);
   return (
@@ -186,9 +236,9 @@ export class WorkspaceMutationAdmission {
   }
   async mutate<T>(paths: string[], run: () => Promise<T>): Promise<T> {
     await this.ready;
-    const canonical = await Promise.all(paths.map(canonicalMutationPath));
+    const traces = await Promise.all(paths.map(mutationPathTrace));
     const protectedPaths = [
-      ...new Set([...canonical, ...paths.map((value) => path.resolve(value))]),
+      ...new Set(traces.flatMap((trace) => trace.scopes)),
     ];
     if (
       [...this.blocked.keys()].some((root) =>
@@ -209,8 +259,15 @@ export class WorkspaceMutationAdmission {
     this.writes.set(id, { paths: protectedPaths, done });
     try {
       await Promise.all(predecessors);
-      const current = await Promise.all(paths.map(canonicalMutationPath));
-      if (current.some((value, index) => value !== canonical[index]))
+      const current = await Promise.all(paths.map(mutationPathTrace));
+      if (
+        current.some(
+          (trace, index) =>
+            trace.canonical !== traces[index]?.canonical ||
+            JSON.stringify(trace.scopes) !==
+              JSON.stringify(traces[index]?.scopes),
+        )
+      )
         throw new Error("WORKSPACE_MUTATION_PATH_CHANGED");
       return await run();
     } finally {
