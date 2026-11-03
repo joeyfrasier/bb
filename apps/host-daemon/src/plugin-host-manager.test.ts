@@ -50,6 +50,7 @@ const heldEnvironments = new Map();
 export default {
   experimental_apiVersion: 1,
   contract: {
+    create: { input: anySchema, output: anySchema },
     remove: { input: anySchema, output: anySchema },
     environment: { input: anySchema, output: anySchema },
     releaseEnvironment: { input: anySchema, output: anySchema },
@@ -67,6 +68,7 @@ export default {
   },
   experimental_signals: { changed: { payload: anySchema } },
   handlers: {
+    create(input, context) { return {status:"created",path:context.internal_DO_NOT_USE_workspaceFence.root}; },
     remove(input, context) { return {status:"removed",fence:context.internal_DO_NOT_USE_workspaceFence,version:context.internal_DO_NOT_USE_workspaceFenceVersion}; },
     async secretProbe(input, context) {
       const secret = process.env.TEST_SECRET ?? null;
@@ -262,6 +264,32 @@ describe("PluginHostManager", () => {
       release();
       await expect(pending).rejects.toThrow();
       expect(fetching).not.toHaveBeenCalled();
+    },
+  );
+
+  it.runIf(Boolean(constants.O_NOFOLLOW))(
+    "does not acquire a duplicate fence for a holder equal to the current attempt",
+    async () => {
+      const { dataDir, manager } = await createManagerFixture();
+      const attempt = join(
+        dataDir,
+        "plugins/environment-git-worktree/host-data/worktrees/synthetic",
+      );
+      await fs.mkdir(attempt, { recursive: true });
+      vi.mocked(findWorktreeForBranch).mockResolvedValueOnce(attempt);
+      const result = await manager.call(
+        callCommand({
+          pluginId: "environment-git-worktree",
+          method: "create",
+          input: {
+            preservationVersion: 1,
+            pathKey: "synthetic",
+            sourcePath: "/synthetic/source",
+            branchName: "synthetic-branch",
+          },
+        }),
+      );
+      expect(result.output).toEqual({ status: "created", path: attempt });
     },
   );
 

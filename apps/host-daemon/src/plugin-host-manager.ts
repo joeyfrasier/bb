@@ -337,6 +337,7 @@ export class PluginHostManager {
               relative &&
               !relative.startsWith("..") &&
               !path.isAbsolute(relative) &&
+              candidate !== canonicalAttempt &&
               !candidate.startsWith(canonicalAttempt + path.sep)
             ) {
               abandonedGeneration = relative.split(path.sep)[0] ?? null;

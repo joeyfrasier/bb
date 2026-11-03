@@ -1,3 +1,4 @@
+import { writeHostFile } from "./command-handlers/file-write.js";
 import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -197,6 +198,132 @@ describe.runIf(Boolean(constants.O_NOFOLLOW))(
         await rm(f.base, { recursive: true, force: true });
       }
     });
+    it("refuses a queued write whose preceding move redirects its path into a protected workspace", async () => {
+      const f = await fixture();
+      let release!: () => void;
+      let spy: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        const source = path.join(f.base, "S");
+        const destination = path.join(f.base, "D");
+        await mkdir(source);
+        await fs.symlink(f.root, path.join(source, "link"));
+        let entered!: () => void;
+        const movingStarted = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const moving = f.admission.mutate([source, destination], async () => {
+          entered();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          await fs.rename(source, destination);
+        });
+        await movingStarted;
+        let resolved!: () => void;
+        const queuedResolved = new Promise<void>((resolve) => {
+          resolved = resolve;
+        });
+        const actual = fs.realpath;
+        spy = vi
+          .spyOn(fs, "realpath")
+          .mockImplementation(
+            async (...args: Parameters<typeof fs.realpath>) => {
+              const value = await actual(...args);
+              if (String(args[0]) === f.base) resolved();
+              return value;
+            },
+          );
+        const target = path.join(destination, "link/.bb/chat");
+        const writing = f.admission.mutate([target], () =>
+          writeHostFile({
+            type: "host.write_file",
+            path: target,
+            content: "late",
+            contentEncoding: "utf8",
+            createParents: true,
+          }),
+        );
+        void writing.catch(() => {});
+        await queuedResolved;
+        await nextTurn();
+        spy.mockRestore();
+        spy = undefined;
+        await f.admission.protect(f.root, "generation", true, async () => {
+          release();
+          await moving;
+          await expect(writing).rejects.toThrow(
+            "WORKSPACE_MUTATION_PATH_CHANGED",
+          );
+          await expect(
+            fs.access(path.join(f.root, ".bb/chat")),
+          ).rejects.toThrow();
+        });
+      } finally {
+        release?.();
+        spy?.mockRestore();
+        await rm(f.base, { recursive: true, force: true });
+      }
+    });
+
+    it("serializes lexical alias ancestor changes behind admitted canonical writes", async () => {
+      const f = await fixture();
+      let release!: () => void;
+      let spy: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        const aliasParent = path.join(f.base, "alias-parent");
+        await mkdir(aliasParent);
+        await fs.symlink(f.root, path.join(aliasParent, "link"));
+        let entered!: () => void;
+        const started = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const writing = f.admission.mutate(
+          [path.join(aliasParent, "link/note")],
+          async () => {
+            entered();
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            await writeFile(path.join(aliasParent, "link/note"), "latest");
+          },
+        );
+        await started;
+        let resolved!: () => void;
+        const resolving = new Promise<void>((resolve) => {
+          resolved = resolve;
+        });
+        const actual = fs.realpath;
+        spy = vi
+          .spyOn(fs, "realpath")
+          .mockImplementation(
+            async (...args: Parameters<typeof fs.realpath>) => {
+              const value = await actual(...args);
+              if (String(args[0]) === aliasParent) resolved();
+              return value;
+            },
+          );
+        let removalEntered = false;
+        const removing = f.admission.mutate([aliasParent], async () => {
+          removalEntered = true;
+          await fs.rm(aliasParent, { recursive: true });
+        });
+        await resolving;
+        await nextTurn();
+        expect(removalEntered).toBe(false);
+        spy.mockRestore();
+        spy = undefined;
+        release();
+        await Promise.all([writing, removing]);
+        expect(await readFile(path.join(f.root, "note"), "utf8")).toBe(
+          "latest",
+        );
+      } finally {
+        release?.();
+        spy?.mockRestore();
+        await rm(f.base, { recursive: true, force: true });
+      }
+    });
+
     it("never reopens a retired generation, including after restart", async () => {
       const f = await fixture();
       try {

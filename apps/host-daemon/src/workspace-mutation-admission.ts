@@ -187,9 +187,12 @@ export class WorkspaceMutationAdmission {
   async mutate<T>(paths: string[], run: () => Promise<T>): Promise<T> {
     await this.ready;
     const canonical = await Promise.all(paths.map(canonicalMutationPath));
+    const protectedPaths = [
+      ...new Set([...canonical, ...paths.map((value) => path.resolve(value))]),
+    ];
     if (
       [...this.blocked.keys()].some((root) =>
-        canonical.some((target) => overlaps(root, target)),
+        protectedPaths.some((target) => overlaps(root, target)),
       )
     )
       throw new Error("WORKSPACE_RETIRING");
@@ -200,12 +203,15 @@ export class WorkspaceMutationAdmission {
     });
     const predecessors = [...this.writes.values()]
       .filter((write) =>
-        write.paths.some((a) => canonical.some((b) => overlaps(a, b))),
+        write.paths.some((a) => protectedPaths.some((b) => overlaps(a, b))),
       )
       .map((write) => write.done);
-    this.writes.set(id, { paths: canonical, done });
+    this.writes.set(id, { paths: protectedPaths, done });
     try {
       await Promise.all(predecessors);
+      const current = await Promise.all(paths.map(canonicalMutationPath));
+      if (current.some((value, index) => value !== canonical[index]))
+        throw new Error("WORKSPACE_MUTATION_PATH_CHANGED");
       return await run();
     } finally {
       this.writes.delete(id);
