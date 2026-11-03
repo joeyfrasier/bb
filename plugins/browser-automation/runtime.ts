@@ -1,3 +1,4 @@
+import { experimental_hostToolchain as hostToolchain } from "@get-bb/plugin-sdk/process";
 import { constants } from "node:fs";
 import {
   access,
@@ -8,7 +9,7 @@ import {
   realpath,
   rm,
 } from "node:fs/promises";
-import { delimiter, isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { outputSchema, type RunOutput } from "./contracts.js";
@@ -153,14 +154,14 @@ async function findChrome(dataDir: string): Promise<string> {
     join(dataDir, "runtime", "chrome"),
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   ];
-  for (const dir of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
-    for (const name of [
-      "google-chrome",
-      "google-chrome-stable",
-      "chromium",
-      "chromium-browser",
-    ])
-      candidates.push(join(dir, name));
+  for (const name of [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+  ]) {
+    const executable = hostToolchain.resolve(name);
+    if (executable !== null) candidates.push(executable);
   }
   for (const candidate of candidates) {
     try {
@@ -205,11 +206,15 @@ export async function createRuntime(args: {
     closed = true;
     stopped.abort();
     preview?.close();
-    closing = (async () => {
+    const attempt = (async () => {
       await Promise.all(processes.map((child) => child.close()));
       await rm(home, { recursive: true, force: true });
-    })();
-    return closing;
+    })().catch((error: unknown) => {
+      if (closing === attempt) closing = null;
+      throw error;
+    });
+    closing = attempt;
+    return attempt;
   };
   const startup = AbortSignal.any([args.signal, AbortSignal.timeout(30_000)]);
   async function waitForFile(path: string): Promise<string> {

@@ -61,8 +61,8 @@ async function writeInjectedSkillSource(
     "utf8",
   );
   return {
-    kind: "workspace-path",
-    sourceType: "project",
+    kind: "host-path",
+    sourceType: "shared-user",
     name: "release-notes",
     description: "Use release-notes when command dispatch tests run.",
     sourceRootPath,
@@ -114,15 +114,9 @@ function createWorkspace(workspacePath = WORKSPACE_PATH): HostWorkspace {
     getDefaultBranch: unexpectedWorkspaceCall,
     getCurrentBranch: unexpectedWorkspaceCall,
     getHeadSha: unexpectedWorkspaceCall,
-    getLocalStateFingerprint: unexpectedWorkspaceCall,
-    getSharedGitRefsFingerprint: unexpectedWorkspaceCall,
+    getLocalStateSnapshot: unexpectedWorkspaceCall,
+    getSharedGitRefsSnapshot: unexpectedWorkspaceCall,
     getAdditionalWorkspaceWriteRoots: vi.fn(async () => []),
-    getStatus: unexpectedWorkspaceCall,
-    getDiff: unexpectedWorkspaceCall,
-    diffFiles: unexpectedWorkspaceCall,
-    diffPatch: unexpectedWorkspaceCall,
-    getPullRequest: unexpectedWorkspaceCall,
-    runPullRequestAction: unexpectedWorkspaceCall,
     commit: unexpectedWorkspaceCall,
   };
 }
@@ -164,6 +158,7 @@ function createRuntime(): FakeDispatchRuntime {
       models: [],
       selectedOnlyModels: [],
     })),
+    listCommands: vi.fn(async () => ({ commands: [] })),
     providerHealth: vi.fn(async () => ({ supported: false as const })),
     providerUsage: vi.fn(async () => ({ supported: false as const })),
     providerInstallationStatus: vi.fn(async () => {
@@ -407,6 +402,44 @@ async function runSuccessfulClaudeCodeUpdateVerification(args: {
 }
 
 describe("dispatchCommand", () => {
+  it("probes projectless commands in a stable empty directory and preserves selected workspaces", async () => {
+    const dataDir = await makeTempDir("bb-command-catalog-");
+    const workspace = path.join(dataDir, "workspace");
+    await fs.mkdir(workspace);
+    await fs.writeFile(path.join(workspace, "project-file"), "project");
+    const directories: string[] = [];
+    const options = makeDispatchOptions({
+      dataDir,
+      runtimeManager: new RuntimeManager({
+        createRuntime,
+        provisionWorkspace: async () => createWorkspace(),
+      }),
+      listCommands: async ({ cwd }) => {
+        directories.push(cwd);
+        const files = await fs.readdir(cwd);
+        return { commands: files.map((name) => ({ name, description: "" })) };
+      },
+    });
+    for (const cwd of [null, null, workspace]) {
+      const result = await dispatchOnlineRpcCommand(
+        {
+          type: "provider.list_commands",
+          providerId: "pi",
+          bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+          cwd,
+        },
+        options,
+        new AbortController().signal,
+      );
+      expect(result).toEqual({
+        commands:
+          cwd === null ? [] : [{ name: "project-file", description: "" }],
+      });
+    }
+    expect(directories[0]).toBe(directories[1]);
+    expect(directories[2]).toBe(workspace);
+  });
+
   it("steers an auto submit when the active turn appears after the server snapshot", async () => {
     const runtime = createRuntime();
     const manager = new RuntimeManager({
@@ -2283,6 +2316,7 @@ describe("dispatchCommand", () => {
     expect(result.providerThreadId).toBe("provider-thread-1");
     expect(fixture.runtime.startThread).toHaveBeenCalledTimes(1);
     const currentCatalog = await stageInjectedSkillSources({
+      workspacePath: fixture.dataDir,
       dataDir: fixture.dataDir,
       injectedSkillSources: [fixture.source],
     });

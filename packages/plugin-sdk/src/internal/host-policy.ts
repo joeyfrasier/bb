@@ -1,3 +1,4 @@
+import type { ContractTagDeclarations } from "./rpc-tags.js";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { z } from "zod";
@@ -280,7 +281,10 @@ export function registerSettingDescriptors(
         `invalid setting key "${key}" — use letters, digits, "-" and "_"`,
       );
     }
-    if (key in target) {
+    if (key === "__proto__") {
+      throw new Error(`setting key "${key}" is reserved`);
+    }
+    if (Object.hasOwn(target, key)) {
       throw new Error(`setting "${key}" is already defined`);
     }
     const parsed = settingDescriptorSchema.safeParse(raw);
@@ -360,7 +364,12 @@ export function validateSettingsUpdate(
 ): string[] {
   const errors: string[] = [];
   for (const [key, value] of Object.entries(values)) {
-    const descriptor: PluginSettingDescriptor | undefined = descriptors[key];
+    const descriptor: PluginSettingDescriptor | undefined = Object.hasOwn(
+      descriptors,
+      key,
+    )
+      ? descriptors[key]
+      : undefined;
     if (!descriptor) {
       errors.push(`unknown setting "${key}"`);
       continue;
@@ -804,10 +813,28 @@ function validateProviderOptionDescriptors(args: {
               field: `${field}[${index}].description`,
               value: record.description,
             });
+      const icon =
+        record.experimental_icon === undefined
+          ? undefined
+          : requireNonBlankString({
+              providerId,
+              field: `${field}[${index}].experimental_icon`,
+              value: record.experimental_icon,
+            });
+      if (
+        icon !== undefined &&
+        !isNamespacedGlyph(icon) &&
+        /[/\\]/u.test(icon)
+      ) {
+        throw new Error(
+          `provider "${providerId}" ${field}[${index}].experimental_icon must be a host glyph name ("Zap") or a declared icon ("<pluginId>/<name>")`,
+        );
+      }
       return Object.freeze({
         id,
         label,
         ...(description === undefined ? {} : { description }),
+        ...(icon === undefined ? {} : { experimental_icon: icon }),
       });
     },
   );
@@ -1703,9 +1730,21 @@ function readRpcMethodContract(
   const description = rpcDescriptionSchema.parse(
     Reflect.get(value, "experimental_description"),
   );
-  return description === null
-    ? { input, output }
-    : { input, output, experimental_description: description };
+  const declarations: ContractTagDeclarations<unknown, unknown> = {};
+  for (const name of ["tags", "keyTags", "invalidates"] as const) {
+    const declaration = Reflect.get(value, name);
+    if (declaration !== undefined) {
+      if (typeof declaration !== "function")
+        throw new Error(`rpc ${method} ${name} must be a function`);
+      Reflect.set(declarations, name, declaration);
+    }
+  }
+  return {
+    input,
+    output,
+    ...declarations,
+    ...(description === null ? {} : { experimental_description: description }),
+  };
 }
 
 export function readRpcPublicationOptions(value: unknown) {
@@ -2296,6 +2335,39 @@ export function providerIconRefusalMessage(
   return `provider "${providerId}" icon ${problem}`;
 }
 
+/**
+ * `bb.providers.register` refusal for the provider icon or a service tier
+ * icon {@link undeclaredIconProblem} rejects, or null when every icon is
+ * acceptable.
+ */
+export function providerDeclarationIconRefusal(
+  pluginId: string,
+  declaredIconNames: ReadonlySet<string>,
+  declaration: NormalizedPluginProviderDeclaration,
+): string | null {
+  const iconProblem =
+    declaration.icon === undefined
+      ? null
+      : undeclaredIconProblem(pluginId, declaredIconNames, declaration.icon);
+  if (iconProblem !== null) {
+    return providerIconRefusalMessage(declaration.id, iconProblem);
+  }
+  for (const [index, tier] of (declaration.serviceTiers ?? []).entries()) {
+    const tierProblem =
+      tier.experimental_icon === undefined
+        ? null
+        : undeclaredIconProblem(
+            pluginId,
+            declaredIconNames,
+            tier.experimental_icon,
+          );
+    if (tierProblem !== null) {
+      return `provider "${declaration.id}" serviceTiers[${index}].experimental_icon ${tierProblem}`;
+    }
+  }
+  return null;
+}
+
 /** `bb.agents.registerTool` refusal for a glyph {@link undeclaredIconProblem} rejects. */
 function agentToolIconRefusalMessage(
   toolName: string,
@@ -2761,9 +2833,10 @@ export function runPluginStorageMigrations(
     database.exec("ALTER TABLE _bb_migrations ADD COLUMN statement_hash TEXT");
   }
   const rows = database
-    .prepare<[], { id: number; statement_hash: string | null }>(
-      "SELECT id, statement_hash FROM _bb_migrations ORDER BY id",
-    )
+    .prepare<
+      [],
+      { id: number; statement_hash: string | null }
+    >("SELECT id, statement_hash FROM _bb_migrations ORDER BY id")
     .all();
   const applied = new Map<number, string | null>();
   for (const row of rows) applied.set(row.id, row.statement_hash);
@@ -2870,6 +2943,7 @@ export function normalizeWebSocketRouteRegistration(
 }
 
 type RpcRegistrationRecord = {
+  declarations: ContractTagDeclarations<unknown, unknown>;
   publication: ReturnType<typeof publishRpcMethod>;
   inputSchema: StandardSchemaV1;
   outputSchema: StandardSchemaV1;
@@ -2928,6 +3002,7 @@ export function normalizeRpcRegistration(
       name,
       {
         publication: publishRpcMethod(name, methodContract, publicationOptions),
+        declarations: methodContract,
         inputSchema: methodContract.input,
         outputSchema: methodContract.output,
         handler,
@@ -3593,6 +3668,30 @@ function normalizeRpcIssues(
       ...(path !== undefined ? { path } : {}),
     };
   });
+}
+
+const rpcRefusalSchema = z.object({
+  code: z.enum(["forbidden", "not_found", "conflict", "invalid"]),
+  message: z.string(),
+  issues: z
+    .array(
+      z.object({
+        message: z.string(),
+        path: z.array(z.union([z.string(), z.number()])).optional(),
+      }),
+    )
+    .optional(),
+});
+
+export function readPluginRpcRefusal(error: unknown): PluginRpcError | null {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    Reflect.get(error, Symbol.for("@get-bb/plugin-sdk/rpc-refusal")) !== true
+  )
+    return null;
+  const parsed = rpcRefusalSchema.safeParse(error);
+  return parsed.success ? parsed.data : null;
 }
 
 export async function validateRpcValue(

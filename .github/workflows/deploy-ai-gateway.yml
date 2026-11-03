@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.repository == 'get-bb/bb'
     name: Deploy AI gateway to Cloudflare Workers
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20

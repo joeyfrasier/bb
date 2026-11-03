@@ -108,6 +108,8 @@ describe("plugin skills tier", () => {
       db,
       hub: {
         getDaemonSessionIdForHost: () => null,
+        notifyPluginChanged: () => {},
+        onWatchedTargets: () => () => {},
         notifyPluginSignal: () => 0,
         notifySystem: () => {},
       },
@@ -149,7 +151,7 @@ describe("plugin skills tier", () => {
     }
 
     const skillTreeRegistry = new SkillTreeRegistry();
-    const entries = resolveSkillCatalogEntries(testLogger, {
+    const entries = await resolveSkillCatalogEntries(testLogger, {
       dataDir,
       pluginSkillRoots: service.listSkillRootContributions(),
       projectSkillSources: [projectGammaSource],
@@ -190,11 +192,13 @@ describe("plugin skills tier", () => {
     expect(service.listSkillRootContributions()).toEqual([
       { pluginId: "relocated", rootPath: join(rootDir, "custom") },
     ]);
-    const sources = resolveSkillCatalogEntries(testLogger, {
-      dataDir: join(workDir, "data"),
-      pluginSkillRoots: service.listSkillRootContributions(),
-      skillTreeRegistry: new SkillTreeRegistry(),
-    }).map((entry) => entry.runtimeSource);
+    const sources = (
+      await resolveSkillCatalogEntries(testLogger, {
+        dataDir: join(workDir, "data"),
+        pluginSkillRoots: service.listSkillRootContributions(),
+        skillTreeRegistry: new SkillTreeRegistry(),
+      })
+    ).map((entry) => entry.runtimeSource);
     expect(sources.map((source) => source.name)).toEqual(["relocated-skill"]);
   });
 });
@@ -216,6 +220,8 @@ describe("plugin agent contributions reach thread runtime config", () => {
       db,
       hub: {
         getDaemonSessionIdForHost: () => null,
+        notifyPluginChanged: () => {},
+        onWatchedTargets: () => () => {},
         notifyPluginSignal: () => 0,
         notifySystem: () => {},
       },

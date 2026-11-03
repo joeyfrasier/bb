@@ -48,6 +48,7 @@ function backgroundTaskItemData(args: {
       status: args.status,
       taskStatus: args.taskStatus,
       skipTranscript: false,
+      foreground: false,
       workflowName: "fixture-mini",
       usage: { totalTokens: 100, toolUses: 2, durationMs: 1500 },
     },
@@ -421,6 +422,10 @@ describe("background-task lifecycle reconciliation triggers", () => {
         ),
       ).toEqual([
         {
+          type: "provider-session-policy.replace",
+          idleProviderSessionTimeoutMinutes: 30,
+        },
+        {
           type: "machine-environment.replace",
           environment: { revision: expect.any(Number), entries: [] },
         },
@@ -462,6 +467,10 @@ describe("background-task lifecycle reconciliation triggers", () => {
           hostDaemonServerWsMessageSchema.parse(JSON.parse(message)),
         ),
       ).toEqual([
+        {
+          type: "provider-session-policy.replace",
+          idleProviderSessionTimeoutMinutes: 30,
+        },
         {
           type: "machine-environment.replace",
           environment: { revision: expect.any(Number), entries: [] },
@@ -686,13 +695,16 @@ describe("active thread disconnect reconciliation triggers", () => {
       await reopenSessionWithoutThreads(harness, session);
       await vi.advanceTimersByTimeAsync(2_000);
 
-      const parentNotices = listEvents(harness.deps.db, {
-        threadId: parent.id,
-      })
-        .filter((row) => row.type === "client/turn/requested")
-        .map((row) => turnRequestEventDataSchema.parse(JSON.parse(row.data)))
-        .filter((data) => data.initiator === "system");
-      expect(parentNotices).toHaveLength(1);
+      const parentNotices = await vi.waitFor(() => {
+        const notices = listEvents(harness.deps.db, {
+          threadId: parent.id,
+        })
+          .filter((row) => row.type === "client/turn/requested")
+          .map((row) => turnRequestEventDataSchema.parse(JSON.parse(row.data)))
+          .filter((data) => data.initiator === "system");
+        expect(notices).toHaveLength(1);
+        return notices;
+      });
       expect(parentNotices[0]).toMatchObject({
         systemMessageKind: "child-interrupted",
         systemMessageSubject: {

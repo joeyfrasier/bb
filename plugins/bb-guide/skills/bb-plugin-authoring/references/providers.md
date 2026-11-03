@@ -45,7 +45,7 @@ bb.providers.register({
     reasoningLevels: ["medium"], // coarse fallback ladder
   },
   reasoningLevels: [{ id: "medium", label: "Medium" }], // labelled picker options
-  serviceTiers: undefined, // e.g. [{ id: "default", label: "Default" }, { id: "fast", label: "Fast" }]
+  serviceTiers: undefined, // e.g. [{ id: "default", label: "Default" }, { id: "fast", label: "Fast" }]; experimental_icon (a host glyph or a declared "<pluginId>/<name>" icon) overrides the selected tier's default Zap glyph
   composerActions: [], // skills typeahead is implicit; ["plan"] opts into plan mode
   models: { fallback: [], scope: "workspace" },
   env: { passthrough: ["BB_ECHO_AGENT_EXECUTABLE"] },
@@ -64,6 +64,14 @@ pass them to the bridge through `deriveProviderOptions`. Use
 provider-specific item or state payloads, and `completedTurnDisplay: "flat"`
 when your agent narrates its work in text the user should keep reading. Each
 field's contract and limits are in `docs/provider-plugin-api.md` §1.
+
+Bridges that reconcile bb-injected skills with the agent's own catalog use the
+same skills index as core. `experimental_scanSkillFiles` walks one root (links
+followed for user roots, bounded by `boundaryPath` for project roots) and
+returns each `SKILL.md` with its bytes and SHA-256 digest.
+`experimental_selectedSkillMentions` returns the skill mentions the user picked
+in the composer, validated against their exact text ranges, so a typed `/name`
+is never mistaken for a selection.
 
 **The icon.** `icon` takes the two shapes of `bb.branding.icon` — a named
 host glyph (`"Zap"`) or a plugin-relative SVG path (`"./icons/echo.svg"`) —
@@ -122,8 +130,10 @@ bb.providers.experimental_contributeEnv("claude-code", async (context) => [
 ```
 
 The server calls the resolver for every matching start, resume, fork, and turn
-command. Its `ExperimentalPluginProviderEnvContext` has `threadId`, `projectId`,
-and `hostId`; return at most 32 `ExperimentalPluginProviderEnvEntry` values.
+command, and when it lists the provider's models on a host. Its
+`ExperimentalPluginProviderEnvContext` has `threadId`, `projectId`, and
+`hostId`; `threadId` and `projectId` are `null` for model listing, which serves
+no thread. Return at most 32 `ExperimentalPluginProviderEnvEntry` values.
 Names must match `[A-Z_][A-Z0-9_]*`; `reason` is required. A
 literal `value` is forwarded as-is. `{ serverPath: "/..." }` is expanded by
 the selected host against its authenticated `BB_SERVER_URL`, which is the
@@ -224,17 +234,15 @@ For an ACP agent, use `@get-bb/plugin-sdk/provider-bridge/acp`. Re-export
 `experimental_acpProviderBridge` as `experimental_providerBridge`. Supply a
 validated `acpLaunchSpec` and an ACP dialect in the static bridge options. The
 public ACP entrypoint includes the bridge, launch schema, agent probe, model
-catalog, tool, and dialect contracts. It supports the `generic`, `cursor`, and
-`grok` dialects.
+catalog, tool, and dialect contracts. It ships the `acp` (generic), `cursor`,
+`grok`, `omp`, and `opencode` dialects. To read another agent's own side
+channels, call `experimental_registerAcpDialect({ id, ...hooks })` at module
+load in the host artifact and name that id as `acpDialect`; a built-in id
+cannot be replaced. `@get-bb/plugin-sdk/provider-bridge/acp-next` is a
+deprecated alias of the same entrypoint; import every member from one subpath,
+since a dialect registered through one is not seen by the other's bridge.
 
 ### Testing a bridge
-
-`@get-bb/plugin-sdk/provider-bridge/acp-next` is a preview of the rebuilt ACP
-bridge with the same exports plus `experimental_registerAcpDialect({ id,
-...hooks })`. Call it at module load in the host artifact and name that id as
-`acpDialect` to read an agent's own side channels; a built-in id (`acp`,
-`cursor`, `grok`, `omp`, `opencode`) cannot be replaced. The subpath will be
-folded into `provider-bridge/acp` when the rebuilt bridge becomes the default.
 
 **Conformance.** Ship a test that drives the published kit,
 `@get-bb/plugin-sdk/provider-bridge/testing`, against your bridge

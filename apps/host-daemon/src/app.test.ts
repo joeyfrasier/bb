@@ -13,6 +13,7 @@ import {
   hostDaemonInteractiveInterruptRequestSchema,
   type HostDaemonInteractiveRequestResponse,
   type HostDaemonContributedEnvEntry,
+  type HostDaemonOnlineRpcCommand,
 } from "@bb/host-daemon-contract";
 import type { HostWatcher } from "@bb/host-watcher";
 import { createDeferredPromise, makeTempDir } from "@bb/test-helpers";
@@ -132,6 +133,7 @@ function createFetchRecorder(
       return Response.json(
         {
           sessionId,
+          idleProviderSessionTimeoutMinutes: 30,
           machineEnvironment: {
             revision: 0,
             entries: args.machineEnvironment ?? [],
@@ -274,6 +276,9 @@ function createFakeRuntime(): AgentRuntime {
         models: [],
         selectedOnlyModels: [],
       };
+    },
+    async listCommands() {
+      return { commands: [] };
     },
     async providerHealth() {
       return { supported: false as const };
@@ -516,6 +521,7 @@ describe("createHostDaemonApp", () => {
       model: "cursor-model",
       displayName: "Cursor Model",
       description: "Test model",
+      reasoningDiscovery: "known" as const,
       supportedReasoningEfforts: [],
       defaultReasoningEffort: "medium" as const,
       isDefault: true,
@@ -558,6 +564,7 @@ describe("createHostDaemonApp", () => {
           type: "provider.list_models",
           providerId: "cursor",
           bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+          contributedEnv: [],
           cwd: "/tmp/worktree",
         },
       });
@@ -584,6 +591,7 @@ describe("createHostDaemonApp", () => {
       expect(listModels).toHaveBeenCalledWith({
         providerId: "cursor",
         cwd: "/tmp/worktree",
+        contributedEnv: [],
         bridgeLaunch: {
           ...dispatchTestRuntimeBridgeLaunch(dataDir),
         },
@@ -597,6 +605,7 @@ describe("createHostDaemonApp", () => {
             type: "provider.list_models",
             providerId: "cursor",
             bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+            contributedEnv: [],
           },
         }),
       ).resolves.toMatchObject({
@@ -619,6 +628,7 @@ describe("createHostDaemonApp", () => {
       model: "codex-model",
       displayName: "Codex Model",
       description: "Test model",
+      reasoningDiscovery: "known" as const,
       supportedReasoningEfforts: [],
       defaultReasoningEffort: "medium" as const,
       isDefault: true,
@@ -665,6 +675,7 @@ describe("createHostDaemonApp", () => {
             type: "provider.list_models",
             providerId: "codex",
             bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+            contributedEnv: [],
           },
         }),
       ).resolves.toMatchObject({
@@ -684,7 +695,225 @@ describe("createHostDaemonApp", () => {
     }
   });
 
-  it("runs the idle provider session reaper on a non-overlapping interval", async () => {
+  type MaintenanceRuntimeMethod =
+    | "listCommands"
+    | "listModels"
+    | "providerHealth"
+    | "providerInstallationRun"
+    | "providerInstallationStatus"
+    | "providerUsage";
+
+  const maintenanceShellEnvCases: Array<{
+    command: HostDaemonOnlineRpcCommand;
+    method: MaintenanceRuntimeMethod;
+    waitsForFreshShellEnv: boolean;
+  }> = [
+    {
+      command: {
+        type: "provider.list_commands",
+        providerId: "codex",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        cwd: "/tmp/worktree",
+      },
+      method: "listCommands",
+      waitsForFreshShellEnv: false,
+    },
+    {
+      command: {
+        type: "provider.usage",
+        providerId: "codex",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+      },
+      method: "providerUsage",
+      waitsForFreshShellEnv: false,
+    },
+    {
+      command: {
+        type: "provider.list_models",
+        providerId: "codex",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        contributedEnv: [],
+      },
+      method: "listModels",
+      waitsForFreshShellEnv: true,
+    },
+    {
+      command: {
+        type: "provider.health",
+        providerId: "codex",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+      },
+      method: "providerHealth",
+      waitsForFreshShellEnv: true,
+    },
+    {
+      command: {
+        type: "provider.installation.status",
+        providerId: "codex",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+      },
+      method: "providerInstallationStatus",
+      waitsForFreshShellEnv: true,
+    },
+    {
+      command: {
+        type: "provider.installation.run",
+        providerId: "codex",
+        action: "install",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+      },
+      method: "providerInstallationRun",
+      waitsForFreshShellEnv: true,
+    },
+  ];
+
+  async function createExpiredShellEnvApp(args: {
+    resolvedAtMs: number | null;
+  }) {
+    const dataDir = await makeTempDir("bb-host-daemon-app-expired-env-");
+    const runtimeOptions: RuntimeOptionsRef = { current: null };
+    const freshShellEnv = createDeferredPromise<Record<string, string>>();
+    const resolveRuntimeShellEnv = vi.fn(() => freshShellEnv.promise);
+    const runtime = createFakeRuntime();
+    const calls: MaintenanceRuntimeMethod[] = [];
+    const recordCall =
+      <TArgs extends unknown[], TResult>(
+        method: MaintenanceRuntimeMethod,
+        call: (...args: TArgs) => Promise<TResult>,
+      ) =>
+      (...callArgs: TArgs) => {
+        calls.push(method);
+        return call(...callArgs);
+      };
+    const recordingRuntime: AgentRuntime = {
+      ...runtime,
+      listCommands: recordCall("listCommands", runtime.listCommands),
+      listModels: recordCall("listModels", runtime.listModels),
+      providerHealth: recordCall("providerHealth", runtime.providerHealth),
+      providerUsage: recordCall("providerUsage", runtime.providerUsage),
+      providerInstallationStatus: recordCall(
+        "providerInstallationStatus",
+        runtime.providerInstallationStatus,
+      ),
+      providerInstallationRun: recordCall(
+        "providerInstallationRun",
+        runtime.providerInstallationRun,
+      ),
+    };
+    const app = await createHostDaemonApp({
+      dataDir,
+      serverUrl: "http://127.0.0.1:3334",
+      hostKey: "host-key-app-test",
+      hostId: "host-app-test",
+      hostName: "App Test Host",
+      instanceId: "instance-app-test",
+      logger: createLogger(),
+      releaseLock: async () => undefined,
+      localApiConfig: null,
+      runtimeShellEnv: { PATH: "/last-resolved/bin:/usr/bin" },
+      ...(args.resolvedAtMs === null
+        ? {}
+        : { runtimeShellEnvResolvedAtMs: args.resolvedAtMs }),
+      resolveRuntimeShellEnv,
+      nowMs: () => 60_000,
+      createRuntime: (options) => {
+        runtimeOptions.current = options;
+        return recordingRuntime;
+      },
+      fetchFn: createFetchRecorder().fetchFn,
+      createWebSocket: createOpeningWebSocket(),
+    });
+    return {
+      app,
+      calls,
+      freshShellEnv,
+      resolveRuntimeShellEnv,
+      runtimeOptions,
+    };
+  }
+
+  it.each(maintenanceShellEnvCases)(
+    "$command.type waits for a fresh shell env: $waitsForFreshShellEnv",
+    async ({ command, method, waitsForFreshShellEnv }) => {
+      const {
+        app,
+        calls,
+        freshShellEnv,
+        resolveRuntimeShellEnv,
+        runtimeOptions,
+      } = await createExpiredShellEnvApp({ resolvedAtMs: 1_000 });
+      try {
+        const response = app.router.handleOnlineRpcRequest({
+          type: "host-rpc.request",
+          requestId: `expired-env-${command.type}`,
+          command,
+        });
+        await vi.waitFor(() =>
+          expect(resolveRuntimeShellEnv).toHaveBeenCalledTimes(1),
+        );
+
+        if (waitsForFreshShellEnv) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          expect(calls).toEqual([]);
+          freshShellEnv.resolve({ PATH: "/fresh/bin:/usr/bin" });
+          await response;
+          expect(calls).toEqual([method]);
+          expect(runtimeOptions.current?.env).toEqual({
+            PATH: "/fresh/bin:/usr/bin",
+          });
+        } else {
+          await expect(response).resolves.toMatchObject({ ok: true });
+          expect(calls).toEqual([method]);
+          expect(runtimeOptions.current?.env).toEqual({
+            PATH: "/last-resolved/bin:/usr/bin",
+          });
+          freshShellEnv.resolve({ PATH: "/fresh/bin:/usr/bin" });
+        }
+      } finally {
+        freshShellEnv.resolve({ PATH: "/fresh/bin:/usr/bin" });
+        await app.daemon.shutdown("test", 0);
+      }
+    },
+  );
+
+  it("waits for the first shell env resolution before listing commands", async () => {
+    const {
+      app,
+      calls,
+      freshShellEnv,
+      resolveRuntimeShellEnv,
+      runtimeOptions,
+    } = await createExpiredShellEnvApp({ resolvedAtMs: null });
+    try {
+      const response = app.router.handleOnlineRpcRequest({
+        type: "host-rpc.request",
+        requestId: "first-env-list-commands",
+        command: {
+          type: "provider.list_commands",
+          providerId: "codex",
+          bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+          cwd: "/tmp/worktree",
+        },
+      });
+      await vi.waitFor(() =>
+        expect(resolveRuntimeShellEnv).toHaveBeenCalledTimes(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(calls).toEqual([]);
+
+      freshShellEnv.resolve({ PATH: "/fresh/bin:/usr/bin" });
+      await expect(response).resolves.toMatchObject({ ok: true });
+      expect(calls).toEqual(["listCommands"]);
+      expect(runtimeOptions.current?.env).toEqual({
+        PATH: "/fresh/bin:/usr/bin",
+      });
+    } finally {
+      freshShellEnv.resolve({ PATH: "/fresh/bin:/usr/bin" });
+      await app.daemon.shutdown("test", 0);
+    }
+  });
+
+  it("uses the latest idle timeout without overlapping sweeps", async () => {
     const logger = createLogger();
     const firstReap =
       createDeferredPromise<RuntimeManagerReapIdleProviderSessionsResult>();
@@ -746,14 +975,18 @@ describe("createHostDaemonApp", () => {
     expect(timer.unref).toHaveBeenCalledTimes(1);
 
     triggerTick();
+    expect(reapIdleProviderSessions).not.toHaveBeenCalled();
+    reaper.setTimeoutMinutes(5);
+    triggerTick();
     await settleReaperPromiseChain();
     expect(reapIdleProviderSessions).toHaveBeenCalledTimes(1);
     expect(reapIdleProviderSessions).toHaveBeenNthCalledWith(1, {
-      idleForMs: 1_800_000,
+      idleForMs: 300_000,
       nowMs: 1_000,
     });
 
     nowMs = 2_000;
+    reaper.setTimeoutMinutes(60);
     triggerTick();
     expect(reapIdleProviderSessions).toHaveBeenCalledTimes(1);
 
@@ -788,7 +1021,7 @@ describe("createHostDaemonApp", () => {
     await settleReaperPromiseChain();
     expect(reapIdleProviderSessions).toHaveBeenCalledTimes(2);
     expect(reapIdleProviderSessions).toHaveBeenNthCalledWith(2, {
-      idleForMs: 1_800_000,
+      idleForMs: 3_600_000,
       nowMs: 2_000,
     });
     expect(logger.warn).toHaveBeenCalledWith(
@@ -798,10 +1031,18 @@ describe("createHostDaemonApp", () => {
       "Idle provider session reaper failed",
     );
 
+    reaper.setTimeoutMinutes(0);
+    triggerTick();
+    await settleReaperPromiseChain();
+    expect(reapIdleProviderSessions).toHaveBeenNthCalledWith(3, {
+      idleForMs: 0,
+      nowMs: 2_000,
+    });
+
     reaper.stop();
     expect(timer.clear).toHaveBeenCalledTimes(1);
     triggerTick();
-    expect(reapIdleProviderSessions).toHaveBeenCalledTimes(2);
+    expect(reapIdleProviderSessions).toHaveBeenCalledTimes(3);
   });
 
   it("reconnects through the server connection when event posting sees an inactive session", async () => {
@@ -858,7 +1099,7 @@ describe("createHostDaemonApp", () => {
     } satisfies AgentRuntime;
     const hostWatcher = {
       watchWorkspace: vi.fn(() => stopWatchingStatus),
-      watchThreadStorageRoot: vi.fn(() => () => undefined),
+      watchThreadStorage: vi.fn(() => () => undefined),
     } satisfies HostWatcher;
     const app = await createHostDaemonApp({
       dataDir,

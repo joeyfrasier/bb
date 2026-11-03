@@ -1,5 +1,6 @@
 import * as React from "react";
 import { flushSync } from "react-dom";
+import { useComposedRefs } from "@radix-ui/react-compose-refs";
 import { Slot } from "@radix-ui/react-slot";
 
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
@@ -46,15 +47,21 @@ const SIDEBAR_MOBILE_BACKDROP_TRANSITION_CLASS =
 
 const SIDEBAR_FRAME_CLASS =
   "bg-sidebar bg-[linear-gradient(var(--surface-recessed),var(--surface-recessed))] pt-(--bb-window-title-bar-height) pr-(--bb-window-frame-lip) pb-(--bb-window-frame-lip) [--bb-window-frame-top:var(--bb-window-title-bar-height)] [--bb-window-frame-lip:var(--bb-frame-window-lip)]";
+const SIDEBAR_FRAME_LEADING_LIP_CLASS =
+  "pl-(--bb-window-frame-leading-lip) [--bb-window-frame-leading-lip:var(--bb-window-frame-lip)]";
 const SIDEBAR_FRAMED_PANEL_CLASS =
   "group-data-[framed]/sidebar-wrapper:top-(--bb-window-frame-top) group-data-[framed]/sidebar-wrapper:h-[calc(var(--bb-shell-height)_-_var(--bb-window-frame-top)_-_var(--bb-window-frame-lip))] group-data-[framed]/sidebar-wrapper:border-r-0! group-data-[framed]/sidebar-wrapper:bg-transparent";
 const SIDEBAR_FRAMED_CARD_EDGE_CLASS = "border-y border-l border-border";
 const SIDEBAR_FRAMED_INSET_CLASS =
-  "isolate px-px pb-px [mask-repeat:no-repeat] [mask-size:100%_100%] -mt-(--bb-window-title-bar-height) h-[calc(100%+var(--bb-window-title-bar-height))] bg-transparent [clip-path:inset(0_round_0_0_var(--bb-frame-card-radius)_0)] before:pointer-events-none before:absolute before:inset-x-0 before:bottom-0 before:top-(--bb-window-title-bar-height) before:-z-10 before:rounded-tr-(--bb-frame-card-radius) before:rounded-br-(--bb-frame-card-radius) before:border-y before:border-r before:border-l before:border-border before:bg-background";
+  "isolate px-px pb-px [mask-repeat:no-repeat] [mask-size:100%_100%] -mt-(--bb-window-title-bar-height) h-[calc(100%+var(--bb-window-title-bar-height))] bg-transparent [clip-path:inset(0_round_0_0_var(--bb-frame-card-radius)_0)] before:pointer-events-none before:absolute before:inset-x-0 before:bottom-0 before:top-(--bb-window-title-bar-height) before:-z-10 before:rounded-tr-(--bb-frame-card-radius) before:rounded-br-(--bb-frame-card-radius) before:bg-background";
+const SIDEBAR_FRAMED_INSET_EDGE_CLASS =
+  "pointer-events-none absolute inset-x-0 bottom-0 top-(--bb-window-title-bar-height) z-50 rounded-tr-(--bb-frame-card-radius) rounded-br-(--bb-frame-card-radius) border border-border";
 const SIDEBAR_FRAMED_EXPANDED_INSET_CLASS =
   "[mask-image:var(--bb-window-card-mask-square-left)] after:pointer-events-none after:absolute after:top-0 after:left-0 after:h-(--bb-window-title-bar-height) after:w-px after:bg-border";
 const SIDEBAR_FRAMED_COLLAPSED_INSET_CLASS =
   "[mask-image:var(--bb-window-card-mask)] [clip-path:inset(0_round_0_0_var(--bb-frame-card-radius)_var(--bb-frame-card-radius))] before:rounded-tl-(--bb-frame-card-radius) before:rounded-bl-(--bb-frame-card-radius) [transition:clip-path_0s_linear_200ms] before:[transition:border-top-left-radius_0s_linear_200ms,border-bottom-left-radius_0s_linear_200ms]";
+const SIDEBAR_FRAMED_COLLAPSED_INSET_EDGE_CLASS =
+  "rounded-tl-(--bb-frame-card-radius) rounded-bl-(--bb-frame-card-radius) [transition:border-top-left-radius_0s_linear_200ms,border-bottom-left-radius_0s_linear_200ms]";
 
 type SidebarMobileWidthStyle = React.CSSProperties & {
   "--sidebar-width-mobile": string;
@@ -506,7 +513,16 @@ const SidebarProvider = React.forwardRef<
         return;
       }
 
-      setIsMobileSidebarClosing(true);
+      React.startTransition(() => {
+        setIsMobileSidebarClosing(true);
+      });
+    }, []);
+
+    React.useLayoutEffect(() => {
+      if (!isMobileSidebarClosing || mobileSettleTimeoutRef.current !== null) {
+        return;
+      }
+
       applySidebarMobileDragStyles({ progress: 0, settling: true });
       mobileSettleTimeoutRef.current = window.setTimeout(() => {
         mobileSettleTimeoutRef.current = null;
@@ -518,7 +534,7 @@ const SidebarProvider = React.forwardRef<
         });
         clearSidebarMobileDragAttributes();
       }, SIDEBAR_MOBILE_DRAG_SETTLE_MS);
-    }, []);
+    }, [isMobileSidebarClosing]);
 
     const openMobileSidebar = React.useCallback(() => {
       if (openMobileRef.current || mobileSettleTimeoutRef.current !== null) {
@@ -654,12 +670,22 @@ const SidebarProvider = React.forwardRef<
                   style={
                     {
                       ...sidebarMobileWidthStyle,
+                      ...(isFramed
+                        ? {
+                            "--bb-window-card-collapsed-left":
+                              desktopCollapsedRailWidth ??
+                              "var(--bb-window-frame-leading-lip)",
+                          }
+                        : {}),
                       ...style,
                     } as React.CSSProperties
                   }
                   className={cn(
                     "group/sidebar-wrapper flex h-full min-h-0 w-full max-md:overflow-clip",
                     isFramed && SIDEBAR_FRAME_CLASS,
+                    isFramed &&
+                      desktopCollapsedRailWidth === null &&
+                      SIDEBAR_FRAME_LEADING_LIP_CLASS,
                     className,
                   )}
                   ref={ref}
@@ -791,7 +817,7 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
           className={cn(
             "fixed inset-y-0 z-10 flex h-(--bb-shell-height) w-(--sidebar-width) select-none flex-col bg-sidebar text-sidebar-foreground [transition:left_200ms_linear,right_200ms_linear,width_200ms_linear,visibility_0s_linear_0s]",
             "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:[transition:left_200ms_linear,right_200ms_linear,width_200ms_linear,visibility_0s_linear_200ms]",
-            "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]",
+            "left-(--bb-window-frame-leading-lip) group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]",
             "group-data-[collapsible=rail]:w-(--sidebar-rail-width)",
             "border-border-seam group-data-[side=left]:border-r",
             SIDEBAR_FRAMED_PANEL_CLASS,
@@ -802,7 +828,7 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
         >
           <div
             data-sidebar="sidebar"
-            className="flex h-full w-full flex-col bg-sidebar group-data-[framed]/sidebar-wrapper:bg-transparent pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
+            className="flex h-full w-full flex-col bg-sidebar group-data-[framed]/sidebar-wrapper:bg-transparent pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
           >
             {children}
           </div>
@@ -1131,7 +1157,7 @@ SidebarTrigger.displayName = "SidebarTrigger";
 const SidebarInset = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"main">
->(({ className, ...props }, ref) => {
+>(({ className, children, ...props }, ref) => {
   const {
     isCompactViewport,
     open,
@@ -1720,7 +1746,19 @@ const SidebarInset = React.forwardRef<
         className,
       )}
       {...props}
-    />
+    >
+      {children}
+      {isFramed ? (
+        <span
+          aria-hidden
+          data-sidebar="inset-edge"
+          className={cn(
+            SIDEBAR_FRAMED_INSET_EDGE_CLASS,
+            !open && SIDEBAR_FRAMED_COLLAPSED_INSET_EDGE_CLASS,
+          )}
+        />
+      ) : null}
+    </main>
   );
 });
 SidebarInset.displayName = "SidebarInset";
@@ -1744,12 +1782,30 @@ const SidebarContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div">
 >(({ className, ...props }, ref) => {
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const composedRef = useComposedRefs(ref, contentRef);
+  React.useLayoutEffect(() => {
+    const element = contentRef.current;
+    if (!element || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const publishScrollbarLane = () => {
+      element.style.setProperty(
+        "--bb-sidebar-scrollbar-lane",
+        `${element.offsetWidth - element.clientWidth}px`,
+      );
+    };
+    publishScrollbarLane();
+    const observer = new ResizeObserver(publishScrollbarLane);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   return (
     <div
-      ref={ref}
+      ref={composedRef}
       data-sidebar="content"
       className={cn(
-        "flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-sidebar",
+        "flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-sidebar [scrollbar-gutter:stable]",
         className,
       )}
       {...props}

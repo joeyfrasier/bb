@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import type { ThreadTimelineUnreadDividerPlacement } from "@/components/thread/timeline";
+import { useState } from "react";
+import type {
+  ThreadTimelineUnreadDividerAnchor,
+  ThreadTimelineUnreadDividerPlacement,
+} from "@/components/thread/timeline";
 
 interface ThreadUnreadDividerThreadState {
   id: string;
@@ -15,6 +18,7 @@ interface ThreadUnreadDividerSnapshot {
 }
 
 interface ThreadUnreadDividerState {
+  ready: boolean;
   autoScroll: boolean;
   placement: ThreadTimelineUnreadDividerPlacement | null;
 }
@@ -24,17 +28,15 @@ interface ShouldTrackThreadUnreadDividerArgs {
   threadId: string | undefined;
 }
 
-interface IsThreadUnreadArgs {
-  lastReadAt: number | null | undefined;
-  latestAttentionAt: number | undefined;
-}
-
 interface UseThreadUnreadDividerStateArgs {
+  anchor: ThreadTimelineUnreadDividerAnchor;
+  hasFreshThread: boolean;
   routeThreadId: string | undefined;
   thread: ThreadUnreadDividerThreadState | undefined;
 }
 
 const NO_UNREAD_DIVIDER_STATE: ThreadUnreadDividerState = {
+  ready: false,
   autoScroll: false,
   placement: null,
 };
@@ -50,109 +52,88 @@ function shouldTrackThreadUnreadDivider({
   return true;
 }
 
-function isThreadUnread({
-  lastReadAt,
-  latestAttentionAt,
-}: IsThreadUnreadArgs): boolean {
-  if (lastReadAt === undefined || latestAttentionAt === undefined) {
-    return false;
-  }
-  return lastReadAt === null || lastReadAt < latestAttentionAt;
-}
-
 function buildUnreadDividerPlacement(
   thread: ThreadUnreadDividerThreadState,
+  anchor: ThreadTimelineUnreadDividerAnchor,
 ): ThreadTimelineUnreadDividerPlacement | null {
-  if (thread.lastReadAt === null) {
-    return { kind: "before-first" };
+  if (
+    thread.lastReadAt === null ||
+    thread.lastReadAt >= thread.latestAttentionAt
+  ) {
+    return null;
   }
-  if (thread.lastReadAt < thread.latestAttentionAt) {
-    return { kind: "after-cutoff", cutoffAt: thread.lastReadAt };
+  return { anchor, cutoffAt: thread.lastReadAt };
+}
+
+function nextThreadUnreadDividerSnapshot(
+  currentSnapshot: ThreadUnreadDividerSnapshot | null,
+  thread: ThreadUnreadDividerThreadState,
+  hasFreshThread: boolean,
+  anchor: ThreadTimelineUnreadDividerAnchor,
+): ThreadUnreadDividerSnapshot | null {
+  const isOpening = currentSnapshot?.threadId !== thread.id;
+  if (isOpening && !hasFreshThread) {
+    return null;
   }
-  return null;
+  if (
+    currentSnapshot?.threadId === thread.id &&
+    currentSnapshot.attentionAt === thread.latestAttentionAt
+  ) {
+    return currentSnapshot;
+  }
+
+  const placement = buildUnreadDividerPlacement(thread, anchor);
+  return {
+    attentionAt: thread.latestAttentionAt,
+    autoScroll: isOpening && placement !== null,
+    placement,
+    threadId: thread.id,
+  };
 }
 
 export function useThreadUnreadDividerState({
+  anchor,
+  hasFreshThread,
   routeThreadId,
   thread,
 }: UseThreadUnreadDividerStateArgs): ThreadUnreadDividerState {
   const [snapshot, setSnapshot] = useState<ThreadUnreadDividerSnapshot | null>(
     null,
   );
-  const trackedThreadIdRef = useRef<string | null>(null);
   const threadId = thread?.id;
   const threadLastReadAt = thread?.lastReadAt;
   const threadLatestAttentionAt = thread?.latestAttentionAt;
+  const trackedThread: ThreadUnreadDividerThreadState | null =
+    threadId === undefined ||
+    threadLastReadAt === undefined ||
+    threadLatestAttentionAt === undefined ||
+    !shouldTrackThreadUnreadDivider({ routeThreadId, threadId })
+      ? null
+      : {
+          id: threadId,
+          lastReadAt: threadLastReadAt,
+          latestAttentionAt: threadLatestAttentionAt,
+        };
+  const currentSnapshot =
+    trackedThread === null
+      ? null
+      : nextThreadUnreadDividerSnapshot(
+          snapshot,
+          trackedThread,
+          hasFreshThread,
+          anchor,
+        );
+  if (currentSnapshot !== snapshot) {
+    setSnapshot(currentSnapshot);
+  }
 
-  useEffect(() => {
-    if (
-      threadId === undefined ||
-      threadLastReadAt === undefined ||
-      threadLatestAttentionAt === undefined ||
-      !shouldTrackThreadUnreadDivider({
-        routeThreadId,
-        threadId,
-      })
-    ) {
-      trackedThreadIdRef.current = null;
-      setSnapshot(null);
-      return;
-    }
-
-    const isFirstTrackedThreadState = trackedThreadIdRef.current !== threadId;
-    trackedThreadIdRef.current = threadId;
-    const threadState: ThreadUnreadDividerThreadState = {
-      id: threadId,
-      lastReadAt: threadLastReadAt,
-      latestAttentionAt: threadLatestAttentionAt,
-    };
-
-    setSnapshot((currentSnapshot) => {
-      if (
-        currentSnapshot?.threadId === threadId &&
-        currentSnapshot.attentionAt === threadLatestAttentionAt
-      ) {
-        if (threadLastReadAt === null) {
-          const autoScroll =
-            currentSnapshot.placement !== null && currentSnapshot.autoScroll;
-          return {
-            attentionAt: threadLatestAttentionAt,
-            autoScroll,
-            placement: { kind: "before-first" },
-            threadId,
-          };
-        }
-        return currentSnapshot;
-      }
-
-      const placement = buildUnreadDividerPlacement(threadState);
-      return {
-        attentionAt: threadLatestAttentionAt,
-        autoScroll: isFirstTrackedThreadState && placement !== null,
-        placement,
-        threadId,
-      };
-    });
-  }, [routeThreadId, threadId, threadLastReadAt, threadLatestAttentionAt]);
-
-  if (
-    !shouldTrackThreadUnreadDivider({
-      routeThreadId,
-      threadId,
-    }) ||
-    snapshot === null ||
-    snapshot.threadId !== threadId ||
-    (snapshot.attentionAt !== threadLatestAttentionAt &&
-      !isThreadUnread({
-        lastReadAt: threadLastReadAt,
-        latestAttentionAt: threadLatestAttentionAt,
-      }))
-  ) {
+  if (currentSnapshot === null) {
     return NO_UNREAD_DIVIDER_STATE;
   }
 
   return {
-    autoScroll: snapshot.autoScroll && snapshot.placement !== null,
-    placement: snapshot.placement,
+    ready: true,
+    autoScroll: currentSnapshot.autoScroll,
+    placement: currentSnapshot.placement,
   };
 }

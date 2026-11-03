@@ -8,6 +8,7 @@ import {
   SCROLL_FOOTER_ATTRIBUTE,
   useStickyFooterAvailableHeight,
 } from "./useStickyFooterAvailableHeight";
+import { createInertScrollPositionKeeper } from "@/test/scroll-position-keeper";
 
 afterEach(() => {
   cleanup();
@@ -59,8 +60,7 @@ function scrollBodyContext(scrollElement: HTMLElement) {
     isAtBottom: true,
     scrollToBottom: () => {},
     scrollElementIntoView: () => {},
-    scrollElementIntoViewClampedToMaxScroll: () => {},
-    captureScrollAnchor: () => {},
+    positionKeeper: createInertScrollPositionKeeper(),
     holdContentPosition: () => {},
   };
 }

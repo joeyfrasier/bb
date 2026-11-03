@@ -1,4 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawnHostProcess as spawn, hostToolchain } from "@bb/process-utils";
+import { openApplicationUrl } from "./application-url.js";
+import { createDesktopLogger } from "./desktop-logger.js";
 import { attachServerUpdateControl } from "./server-update-control.js";
 import { registerServerChoiceIpc } from "./server-choice-ipc.js";
 import { randomUUID } from "node:crypto";
@@ -56,6 +58,7 @@ import {
 } from "@bb/server-contract";
 import { z } from "zod";
 import { registerDesktopClipboardIpc } from "./desktop-clipboard.js";
+import { registerDesktopAttentionIpc } from "./desktop-attention.js";
 import { registerDesktopWindowFocusIpc } from "./desktop-window-focus.js";
 import {
   assertPathExists,
@@ -198,7 +201,6 @@ import {
   createDesktopAutoUpdateService,
   createElectronAutoUpdaterAdapter,
   shouldEnableDesktopAutoUpdate,
-  type DesktopAutoUpdateLogger,
   type DesktopAutoUpdateService,
 } from "./desktop-auto-update.js";
 import { mergeDesktopUpdateInfo } from "./desktop-update-info.js";
@@ -208,6 +210,7 @@ import {
   BB_DESKTOP_INFO_CHANGED_CHANNEL,
   BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
   BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
+  BB_DESKTOP_OPEN_APPLICATION_URL_CHANNEL,
   BB_DESKTOP_SET_THEME_CHANNEL,
   BB_DESKTOP_ZOOM_COMMAND_CHANNEL,
 } from "./desktop-update-ipc.js";
@@ -262,7 +265,6 @@ import {
   BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
 } from "./desktop-browser-ipc.js";
 import { parseDesktopSystemConfig } from "./desktop-system-config.js";
-import { ensurePackagedUserShellPath } from "./desktop-shell-path.js";
 import { resolveDesktopReloadShortcut } from "./desktop-reload-shortcut.js";
 import {
   createLogTailer,
@@ -554,7 +556,7 @@ function getCurrentDesktopInfo(): BbDesktopInfo | null {
   }
   return {
     ...info,
-    serverDaemonLogsAvailable: shouldEnableServerDaemonLogsMenu(),
+    serverDaemonLogsAvailable: true,
   };
 }
 
@@ -571,6 +573,7 @@ function zoomWebContents(
   if (!target) {
     return;
   }
+  if (desktopWindowFactory?.zoom(target.id, command)) return;
   target.setZoomFactor(nextZoomFactor(target.getZoomFactor(), command));
 }
 
@@ -654,17 +657,7 @@ function sendDesktopWindowStateChanged(
   );
 }
 
-const desktopLogger: DesktopAutoUpdateLogger = {
-  error(message) {
-    process.stderr.write(`${message}\n`);
-  },
-  info(message) {
-    process.stderr.write(`${message}\n`);
-  },
-  warn(message) {
-    process.stderr.write(`${message}\n`);
-  },
-};
+const desktopLogger = createDesktopLogger({ logDir: formatLogDirectory() });
 
 function resolveDataDirFromEnv(args: ResolveDataDirFromEnvArgs): string {
   const rawDataDir = args.env.BB_DATA_DIR?.trim();
@@ -705,13 +698,6 @@ function createDesktopPathContext(): DesktopPathContext {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
   };
-}
-
-function shouldEnableServerDaemonLogsMenu(): boolean {
-  return (
-    (process.platform === "darwin" || process.platform === "win32") &&
-    currentRuntime?.ownership === "spawned"
-  );
 }
 
 const pendingCloseWindowRequests = new Map<number, NodeJS.Timeout>();
@@ -784,13 +770,19 @@ function listMenuConnectServers(): ConnectServerRef[] {
 }
 
 function listServerChoices() {
-  return buildDesktopServerChoices(serverTargetStore, listMenuConnectServers());
+  return buildDesktopServerChoices(
+    serverTargetStore,
+    listMenuConnectServers(),
+    builtinServerUrl,
+  );
 }
 
 function buildMenuServerItems(connectServers: ConnectServerRef[]) {
-  return buildDesktopServerChoices(serverTargetStore, connectServers).map(
-    ({ active, id, name }) => ({ checked: active, id, name }),
-  );
+  return buildDesktopServerChoices(
+    serverTargetStore,
+    connectServers,
+    builtinServerUrl,
+  ).map(({ active, id, name }) => ({ checked: active, id, name }));
 }
 
 function buildServerMenuArgs(): ServerMenuArgs {
@@ -926,13 +918,12 @@ function refreshApplicationMenu(): void {
       }
       requestRendererWindowClose(browserWindow);
     },
-    openServerDaemonLogs() {
-      void openServerDaemonLogs();
+    openLocalLogs() {
+      void openLocalLogs();
     },
     onServerMenuWillShow() {
       connectServerSync?.onListRequested();
     },
-    serverDaemonLogsMenuEnabled: shouldEnableServerDaemonLogsMenu(),
   });
 }
 
@@ -944,9 +935,6 @@ function setCurrentRuntime(runtime: DesktopRuntime | null): void {
     connectServerSync?.onRuntimeReady();
   }
   refreshApplicationMenu();
-  if (runtime?.ownership !== "spawned") {
-    closeServerDaemonLogsWindow();
-  }
   sendDesktopInfoChanged();
 }
 
@@ -1076,7 +1064,7 @@ async function refreshSystemConfig(
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`Could not refresh system config: ${message}\n`);
+    desktopLogger.warn(`Could not refresh system config: ${message}`);
   }
 }
 
@@ -2095,26 +2083,7 @@ function sendLogViewerSnapshot(args: SendLogViewerSnapshotArgs): void {
   });
 }
 
-function closeServerDaemonLogsWindow(): void {
-  logViewerTailer?.stop();
-  logViewerTailer = null;
-  logViewerLineBuffer?.stop();
-  logViewerLineBuffer = null;
-
-  const browserWindow = logViewerWindow;
-  logViewerWindow = null;
-  if (browserWindow !== null && !browserWindow.isDestroyed()) {
-    browserWindow.close();
-  }
-}
-
 async function handleOpenLogsFolder(): Promise<LogViewerOpenLogsFolderResult> {
-  if (!shouldEnableServerDaemonLogsMenu()) {
-    throw new Error(
-      "Server and daemon logs are only available for owned runtimes",
-    );
-  }
-
   const logDir = formatLogDirectory();
   const errorMessage = await shell.openPath(logDir);
   if (errorMessage.length > 0) {
@@ -2145,7 +2114,7 @@ async function loadLogViewerWindow(
     minHeight: 520,
     minWidth: 840,
     show: false,
-    title: "bb - Server & Daemon Logs",
+    title: "bb - Local Logs",
     titleBarStyle: "default",
     webPreferences: {
       contextIsolation: true,
@@ -2205,8 +2174,8 @@ async function loadLogViewerWindow(
   await tailer.start();
 }
 
-async function openServerDaemonLogs(): Promise<void> {
-  if (!shouldEnableServerDaemonLogsMenu() || logViewerPreloadPath === null) {
+async function openLocalLogs(): Promise<void> {
+  if (logViewerPreloadPath === null) {
     return;
   }
 
@@ -2258,6 +2227,11 @@ async function loadLoadingView(): Promise<void> {
 }
 
 async function loadStartupError(args: LoadStartupErrorArgs): Promise<void> {
+  desktopLogger.error(
+    args.logs.length === 0
+      ? `[desktop] ${args.title}: ${args.details}`
+      : `[desktop] ${args.title}: ${args.details}\nbb-app output:\n${args.logs}`,
+  );
   await loadActionView({
     ...args,
     details:
@@ -2309,7 +2283,6 @@ async function createApplicationWindow(
     initialUrl: args.initialUrl,
     stateKey: args.stateKey,
   });
-  registerApplicationWindow(browserWindow);
   if (bbAppLoaded && shouldOpenDevTools()) {
     browserWindow.webContents.openDevTools({ mode: "detach" });
   }
@@ -2370,7 +2343,16 @@ async function finishQuit(): Promise<void> {
   desktopAutoUpdateService?.stop();
   desktopBrowserViewManager?.destroyAll();
   desktopFindViewManager?.destroyAll();
-  await desktopWindowFactory?.persistOpenWindows();
+  await desktopWindowFactory
+    ?.persistOpenWindows()
+    .catch((error) =>
+      desktopLogger.error(
+        `Could not save desktop window state: ${String(error)}`,
+      ),
+    );
+  for (const browserWindow of BrowserWindow.getAllWindows()) {
+    browserWindow.hide();
+  }
   await stopOwnedRuntime();
 }
 
@@ -2408,6 +2390,7 @@ function registerDesktopUpdateIpc(): void {
       desktopLogger.error(`Could not switch server: ${String(error)}`),
   });
   registerDesktopWindowFocusIpc(applicationWindowWebContentsIds);
+  registerDesktopAttentionIpc(applicationWindowWebContentsIds);
   registerDesktopClipboardIpc(applicationWindowWebContentsIds);
   ipcMain.on(BB_DESKTOP_ZOOM_COMMAND_CHANNEL, (event, payload: unknown) => {
     const parsed = bbDesktopZoomCommandSchema.safeParse(payload);
@@ -2425,7 +2408,7 @@ function registerDesktopUpdateIpc(): void {
     return getSenderDesktopWindowState(event);
   });
   ipcMain.handle(BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL, async () => {
-    await openServerDaemonLogs();
+    await openLocalLogs();
   });
   ipcMain.handle(BB_DESKTOP_OPEN_DATA_DIRECTORY_CHANNEL, async () => {
     await openDataDirectory();
@@ -2497,6 +2480,20 @@ function registerDesktopUpdateIpc(): void {
       resolveApplicationWindow(event.sender)?.close();
     }
   });
+  ipcMain.handle(
+    BB_DESKTOP_OPEN_APPLICATION_URL_CHANNEL,
+    async (event, value: unknown) => {
+      const owner = resolveApplicationWindow(event.sender);
+      if (
+        owner === null ||
+        owner.webContents !== event.sender ||
+        event.senderFrame !== event.sender.mainFrame
+      )
+        throw new Error("Application window is unavailable.");
+      await openApplicationUrl(value);
+    },
+  );
+
   ipcMain.on(
     BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
     (_event, payload: unknown) => {
@@ -2856,13 +2853,6 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
 }
 
 async function runDesktopApp(): Promise<void> {
-  ensurePackagedUserShellPath({
-    env: process.env,
-    isPackaged: app.isPackaged,
-    logger: desktopLogger,
-    platform: process.platform,
-  });
-
   const applicationName = app.isPackaged
     ? DESKTOP_RELEASE_INFO.applicationName
     : "bb-dev";
@@ -2926,13 +2916,24 @@ async function runDesktopApp(): Promise<void> {
     },
   });
 
+  app.setAppUserModelId(
+    DESKTOP_RELEASE_CHANNEL === "nightly"
+      ? "dev.bb.desktop.nightly"
+      : "dev.bb.desktop",
+  );
+  if (app.isPackaged) {
+    await hostToolchain.refresh();
+    Object.assign(process.env, hostToolchain.environment());
+  }
   await app.whenReady();
   if (app.isPackaged) {
     await session.defaultSession.clearCache();
   }
 
   const paths = createDesktopPathContext();
+  const devIcon = !paths.isPackaged || process.env.BB_DESKTOP_DEV_ICON === "1";
   const iconPath = resolveDesktopIconPath({
+    devIcon,
     packagedIconFileName: DESKTOP_RELEASE_INFO.iconFileName,
     paths,
   });
@@ -2999,11 +3000,7 @@ async function runDesktopApp(): Promise<void> {
   });
   assertPathExists({ label: "app icon", path: iconPath });
 
-  if (
-    process.platform === "darwin" &&
-    app.dock !== undefined &&
-    !paths.isPackaged
-  ) {
+  if (process.platform === "darwin" && app.dock !== undefined && devIcon) {
     app.dock.setIcon(iconPath);
   }
   await reapStaleOwnedRuntime({
@@ -3290,6 +3287,8 @@ async function runDesktopApp(): Promise<void> {
   );
   desktopBrowserBrokerClient = createDesktopBrowserBrokerClient({
     broker: desktopBrowserBroker,
+    fetchImpl: (input, init) =>
+      net.fetch(input instanceof URL ? input.toString() : input, init),
     dataDir,
     homeDir: homedir(),
     getServerUrl() {
@@ -3345,6 +3344,7 @@ async function runDesktopApp(): Promise<void> {
     openExternalUrl(openArgs) {
       void shell.openExternal(openArgs.url);
     },
+    onWindowCreated: registerApplicationWindow,
     preloadPath,
     userDataPath,
   });
@@ -3352,12 +3352,9 @@ async function runDesktopApp(): Promise<void> {
 
   refreshApplicationMenu();
   await loadLoadingView();
-  const restoredWindows = await desktopWindowFactory.restoreSavedWindows({
+  await desktopWindowFactory.restoreSavedWindows({
     initialUrl: currentWindowUrl,
   });
-  for (const browserWindow of restoredWindows) {
-    registerApplicationWindow(browserWindow);
-  }
   await activateLocalServerMoveIfLocked();
   if (
     serverTargetStore.getTarget().kind === "builtin" &&
@@ -3374,7 +3371,6 @@ async function runDesktopApp(): Promise<void> {
 void runDesktopApp().catch((error) => {
   const message =
     error instanceof Error ? (error.stack ?? error.message) : String(error);
-  process.stderr.write(`${message}\n`);
   void loadStartupError({
     details: message,
     logs: "",

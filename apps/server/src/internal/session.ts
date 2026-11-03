@@ -1,4 +1,5 @@
 import {
+  getAppSettings,
   getLatestSessionForHost,
   getHost,
   listRetiredLoadedEnvironmentIdsOnHost,
@@ -9,6 +10,7 @@ import {
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonProjectAttachmentContentQuerySchema,
+  isCompatibleHostDaemonProtocolVersion,
   hostDaemonSessionOpenRequestSchema,
   SERVER_MOVED_ERROR_CODE,
   typedRoutes,
@@ -26,7 +28,7 @@ import {
   getAuthenticatedDaemon,
 } from "./auth.js";
 import { requireAuthenticatedDaemonSession } from "./session-state.js";
-import { readAttachment } from "../services/projects/attachments.js";
+import { createAttachmentContentResponse } from "../services/projects/attachments.js";
 import { handleHostSessionOpened } from "./session-owner-side-effects.js";
 import { resolveReportedConnectMachineId } from "./hosts.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
@@ -64,6 +66,24 @@ export function registerInternalSessionRoutes(
   serverMove: ServerMoveSessionGate,
 ): void {
   const machineEnvironment = new HostEnvironmentSync(deps);
+  deps.hub.onChangedMessage((message) => {
+    const hostIds =
+      message.entity === "system" && message.changes.includes("config-changed")
+        ? deps.hub.listConnectedHostIds()
+        : message.entity === "host" &&
+            message.id &&
+            message.changes.includes("host-connected")
+          ? [message.id]
+          : [];
+    if (hostIds.length === 0) return;
+    const { idleProviderSessionTimeoutMinutes } = getAppSettings(deps.db);
+    for (const hostId of hostIds) {
+      deps.hub.sendDaemonMessage(hostId, {
+        type: "provider-session-policy.replace",
+        idleProviderSessionTimeoutMinutes,
+      });
+    }
+  });
   const { get } = typedRoutes<HostDaemonInternalSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
   });
@@ -101,7 +121,9 @@ export function registerInternalSessionRoutes(
       hostId: compatibility.data.hostId,
     });
 
-    if (compatibility.data.protocolVersion !== HOST_DAEMON_PROTOCOL_VERSION) {
+    if (
+      !isCompatibleHostDaemonProtocolVersion(compatibility.data.protocolVersion)
+    ) {
       updateHost(deps.db, deps.hub, daemon.hostId, {
         lastRejectedProtocolVersion: compatibility.data.protocolVersion,
       });
@@ -202,9 +224,18 @@ export function registerInternalSessionRoutes(
         connectShares: deps.sharedPorts.reconcileSharedPortsForHost(
           daemon.hostId,
         ),
+        ...(deps.sharedPorts.hostSupportsNextTunnel(daemon.hostId)
+          ? {
+              connectNext: deps.sharedPorts.reconcileNextTunnelForHost(
+                daemon.hostId,
+              ),
+            }
+          : {}),
         pluginHostGenerations: plugins.listHostArtifactGenerations(),
         retiredEnvironmentIds,
         machineEnvironment: await machineEnvironment.snapshot(daemon.hostId),
+        idleProviderSessionTimeoutMinutes: getAppSettings(deps.db)
+          .idleProviderSessionTimeoutMinutes,
       },
       201,
     );
@@ -239,16 +270,11 @@ export function registerInternalSessionRoutes(
         );
       }
 
-      const attachment = await readAttachment(
-        deps.config.dataDir,
-        query.projectId,
-        query.path,
-      );
-      return new Response(new Uint8Array(attachment.content), {
-        status: 200,
-        headers: {
-          "content-type": attachment.mimeType ?? "application/octet-stream",
-        },
+      return createAttachmentContentResponse({
+        dataDir: deps.config.dataDir,
+        projectId: query.projectId,
+        path: query.path,
+        request: context.req.raw,
       });
     },
   );

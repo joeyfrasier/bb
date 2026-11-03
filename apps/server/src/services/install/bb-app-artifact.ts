@@ -1,4 +1,8 @@
-import { execFile } from "node:child_process";
+import {
+  execHostFile,
+  hostToolchain,
+  omitNpmScriptPolicyEnv,
+} from "@bb/process-utils";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -6,6 +10,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rename,
   rm,
@@ -14,12 +19,9 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@bb/host-daemon-contract";
-import { resolveBundledNpmCli } from "@bb/plugin-build";
-import { omitNpmScriptPolicyEnv } from "@bb/process-utils";
 
-const execFileAsync = promisify(execFile);
+const execFileAsync = execHostFile;
 const HOST_DEPENDENCIES = [
   "@parcel/watcher",
   "fs-native-extensions",
@@ -72,7 +74,7 @@ export async function defaultCommandRunner(
   args: readonly string[],
   cwd: string,
 ): Promise<string> {
-  const npmCliPath = command === "npm" ? resolveBundledNpmCli() : null;
+  const npmCliPath = command === "npm" ? hostToolchain.bundledNpmCli() : null;
   const result = await execFileAsync(
     npmCliPath === null ? command : process.execPath,
     npmCliPath === null ? [...args] : [npmCliPath, ...args],
@@ -185,6 +187,15 @@ function hostPackageJson(packageJson: BbAppPackageJson): object {
   };
 }
 
+async function makeDirectoriesOwnerWritable(directory: string): Promise<void> {
+  await chmod(directory, (await stat(directory)).mode | 0o700);
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      await makeDirectoriesOwnerWritable(join(directory, entry.name));
+    }
+  }
+}
+
 async function materializePackagedHostPackage(
   packageRoot: string,
   packageJson: BbAppPackageJson,
@@ -215,6 +226,7 @@ async function materializePackagedHostPackage(
     join(hostDaemonTarget, "bb-chunks"),
     { recursive: true },
   );
+  await makeDirectoriesOwnerWritable(join(hostDaemonTarget, "bb-chunks"));
   try {
     await copyFile(
       join(packageRoot, "README.md"),

@@ -79,7 +79,7 @@ import {
   PromptStackCollapseRow,
   useDisclosureFocusHandoff,
 } from "@bb/shared-ui/prompt-stack-disclosure";
-import { PROMPT_STACK_ROW_ACTION_TAKEOVER_CLASS } from "@/components/promptbox/banner/prompt-banner-actions";
+import { PROMPT_STACK_ROW_ACTION_TAKEOVER_CLASS } from "@bb/shared-ui/prompt-banner-actions";
 import { useScrollOverflowState } from "@/components/thread/timeline/useScrollOverflowState";
 import { OverflowFade } from "@bb/shared-ui/overflow-fade";
 import { InlineMessageEditorFrame } from "@/components/promptbox/InlineMessageEditorFrame";
@@ -100,13 +100,14 @@ import {
   preserveLeadQueuedMessageGroupAfterReorder,
   type QueuedMessageReorderRequest,
 } from "@/lib/queued-message-reorder";
-import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
+import type { PromptMentionLinkResolver } from "@bb/client-core";
 import {
   PromptMentionPill,
   shiftMentionsToTextRange,
 } from "@/components/thread/timeline/ConversationMessageMentions";
 import {
-  buildPromptMentionComponent,
+  PromptMentionElement,
+  PromptMentionsContext,
   remarkPromptMentions,
   substitutePromptMentions,
 } from "@/components/ui/markdown-prompt-mentions";
@@ -234,6 +235,7 @@ const QUEUED_MARKDOWN_COMPONENTS: Components = {
   thead: ({ children }) => <span>{children}</span>,
   tr: ({ children }) => <span>{children} </span>,
   ul: ({ children }) => <span>{children}</span>,
+  "bb-prompt-mention": PromptMentionElement,
 };
 
 function CompactQueuedMarkdownPreview({
@@ -254,25 +256,24 @@ function CompactQueuedMarkdownPreview({
       normalizePromptBlockquoteBoundaries(promptMentionSubstitution.content),
     [promptMentionSubstitution.content],
   );
-  const components = useMemo<Components>(
+  const promptMentions = useMemo(
     () => ({
-      ...QUEUED_MARKDOWN_COMPONENTS,
-      "bb-prompt-mention": buildPromptMentionComponent({
-        mentions: promptMentionSubstitution.mentions,
-        resolveMentionLink,
-      }),
+      mentions: promptMentionSubstitution.mentions,
+      resolveMentionLink,
     }),
     [promptMentionSubstitution.mentions, resolveMentionLink],
   );
 
   return (
     <span className={queuedMarkdownPreviewClass(compact)}>
-      <ReactMarkdown
-        components={components}
-        remarkPlugins={QUEUED_MARKDOWN_REMARK_PLUGINS}
-      >
-        {markdownContent}
-      </ReactMarkdown>
+      <PromptMentionsContext.Provider value={promptMentions}>
+        <ReactMarkdown
+          components={QUEUED_MARKDOWN_COMPONENTS}
+          remarkPlugins={QUEUED_MARKDOWN_REMARK_PLUGINS}
+        >
+          {markdownContent}
+        </ReactMarkdown>
+      </PromptMentionsContext.Provider>
     </span>
   );
 }

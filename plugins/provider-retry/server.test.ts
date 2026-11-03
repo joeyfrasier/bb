@@ -1,6 +1,8 @@
 import {
   retryAvailabilityMethod,
+  retryConsentMethod,
   type RetryAvailability,
+  type RetryConsent,
 } from "./src/retry-contract.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -16,6 +18,7 @@ import {
   OVERLOAD_RETRY_BASE_MS,
   RESET_BUFFER_MS,
   RESET_JITTER_MS,
+  UNAVAILABLE_RETRY_BASE_MS,
   decideRetry,
 } from "./src/retry-policy.js";
 
@@ -293,15 +296,77 @@ describe("provider retry policy", () => {
     expect(fourthAttempt.sendAt).toBeLessThan(NOW_MS + fourthDelay * 2);
   });
 
+  it.each<{ name: string; errorInfo: PluginTurnFailedEvent["errorInfo"] }>([
+    {
+      name: "Claude Code behind an unreachable Account Pooler",
+      errorInfo: {
+        category: "internal",
+        providerCode: null,
+        httpStatusCode: 502,
+      },
+    },
+    {
+      name: "Codex behind an unreachable Account Pooler",
+      errorInfo: {
+        category: "stream-disconnected",
+        providerCode: "responseStreamDisconnected",
+        httpStatusCode: 502,
+      },
+    },
+    {
+      name: "Codex native retry exhaustion on a gateway error",
+      errorInfo: {
+        category: "too-many-failed-attempts",
+        providerCode: "responseTooManyFailedAttempts",
+        httpStatusCode: 503,
+      },
+    },
+    {
+      name: "a provider connection failure",
+      errorInfo: {
+        category: "connection-failed",
+        providerCode: "httpConnectionFailed",
+        httpStatusCode: null,
+      },
+    },
+  ])("retries $name with backoff that starts at a minute", ({ errorInfo }) => {
+    const unavailable = failure({ errorInfo, rateLimits: null });
+    expect(
+      decideRetry({
+        availability: { kind: "not-routed" },
+        failure: unavailable,
+        maximumWaitMs: null,
+        now: NOW_MS,
+        random: 0,
+      }),
+    ).toEqual({
+      kind: "retry",
+      sendAt: NOW_MS + UNAVAILABLE_RETRY_BASE_MS,
+      reason: "Provider unavailable",
+    });
+    const fourthAttempt = decideRetry({
+      availability: { kind: "not-routed" },
+      failure: { ...unavailable, attemptNumber: 4 },
+      maximumWaitMs: null,
+      now: NOW_MS,
+      random: 0.999_999,
+    });
+    expect(fourthAttempt.kind).toBe("retry");
+    if (fourthAttempt.kind !== "retry") return;
+    const fourthDelay = UNAVAILABLE_RETRY_BASE_MS * 2 ** 3;
+    expect(fourthAttempt.sendAt).toBeGreaterThan(NOW_MS + fourthDelay);
+    expect(fourthAttempt.sendAt).toBeLessThan(NOW_MS + fourthDelay * 2);
+  });
+
   it("declines failures that are not retryable, and limits that do not reset", () => {
     expect(
       decideRetry({
         availability: { kind: "not-routed" },
         failure: failure({
           errorInfo: {
-            category: "internal",
+            category: "unauthorized",
             providerCode: null,
-            httpStatusCode: 500,
+            httpStatusCode: 401,
           },
         }),
         maximumWaitMs: null,
@@ -511,6 +576,29 @@ describe("provider retry plugin", () => {
     await host.harness.dispose();
   });
 
+  it("retries a turn the Account Pooler failed because it could not reach the provider", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    const result = await host.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({
+        errorInfo: {
+          category: "internal",
+          providerCode: null,
+          httpStatusCode: 502,
+        },
+        rateLimits: null,
+      }),
+    );
+    expect(result.errors).toEqual([]);
+    expect(host.retries).toHaveLength(1);
+    expect(host.retries[0]?.reason).toBe("Provider unavailable");
+    expect(host.retries[0]?.sendAt).toBeGreaterThanOrEqual(
+      NOW_MS + UNAVAILABLE_RETRY_BASE_MS,
+    );
+    await host.harness.dispose();
+  });
+
   it("reports a broken availability source instead of using a stale provider snapshot", async () => {
     const host = createHost([], {
       experimental_discoverRpc: async () => [
@@ -654,6 +742,148 @@ describe("provider retry plugin", () => {
       },
     });
     expect(host.deleted).toEqual([]);
+    await host.harness.dispose();
+  });
+});
+
+describe("asking the plugin that sent the failed turn", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SENDER = "automations";
+
+  function consentHost(answer: () => Promise<RetryConsent>) {
+    const asked: { pluginId: string; input: unknown }[] = [];
+    const host = createHost([], {
+      experimental_discoverRpc: async (query) =>
+        query?.pluginId === SENDER && query.method === retryConsentMethod
+          ? [
+              {
+                pluginId: SENDER,
+                displayName: "Automations",
+                method: retryConsentMethod,
+              },
+            ]
+          : [],
+      callRpc: async (args) => {
+        asked.push({ pluginId: args.pluginId, input: args.input });
+        return answer();
+      },
+    });
+    return { host, asked };
+  }
+
+  it("does not retry a turn its sender declines, and explains why", async () => {
+    const { host, asked } = consentHost(async () => ({
+      kind: "decline",
+      reason: "the automation runs again on its schedule",
+    }));
+    await plugin(host.bb);
+
+    const result = await host.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      overloadedFailure({ originPluginId: SENDER }),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(host.retries).toEqual([]);
+    expect(asked).toEqual([
+      {
+        pluginId: SENDER,
+        input: {
+          threadId: THREAD_ID,
+          requestId: REQUEST_ID,
+          reason: "Provider overloaded",
+          sendAt: expect.any(Number),
+        },
+      },
+    ]);
+    expect((await host.harness.runCli(["explain", THREAD_ID])).stdout).toBe(
+      `${THREAD_ID}: Skipped: declined-by-sender (${SENDER}: the automation runs again on its schedule).\n`,
+    );
+    await host.harness.dispose();
+  });
+
+  it.each([
+    { label: "allows it", answer: async () => ({ kind: "allow" }) as const },
+    {
+      label: "cannot answer",
+      answer: async (): Promise<RetryConsent> => {
+        throw new Error("plugin unloaded");
+      },
+    },
+  ])("retries a turn when its sender $label", async ({ answer }) => {
+    const { host, asked } = consentHost(answer);
+    await plugin(host.bb);
+
+    await host.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      overloadedFailure({ originPluginId: SENDER }),
+    );
+
+    expect(asked).toHaveLength(1);
+    expect(host.retries).toHaveLength(1);
+    expect(host.retries[0]?.reason).toBe("Provider overloaded");
+    await host.harness.dispose();
+  });
+
+  it("retries a turn when looking up its sender fails", async () => {
+    const host = createHost([], {
+      experimental_discoverRpc: async () => {
+        throw new Error("plugin host restarting");
+      },
+    });
+    await plugin(host.bb);
+
+    const result = await host.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      overloadedFailure({ originPluginId: SENDER }),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(host.retries).toHaveLength(1);
+    await host.harness.dispose();
+  });
+
+  it.each([
+    { label: "a user", originPluginId: null },
+    { label: "a plugin with no consent method", originPluginId: "workflows" },
+  ])(
+    "retries a turn sent by $label without asking anyone",
+    async ({ originPluginId }) => {
+      const { host, asked } = consentHost(async () => ({
+        kind: "decline",
+        reason: "should not be asked",
+      }));
+      await plugin(host.bb);
+
+      await host.harness.behavior.emitThreadEvent(
+        "turn.failed",
+        overloadedFailure({ originPluginId }),
+      );
+
+      expect(asked).toEqual([]);
+      expect(host.retries).toHaveLength(1);
+      await host.harness.dispose();
+    },
+  );
+
+  it("does not ask the sender about a failure it would not retry anyway", async () => {
+    const { host, asked } = consentHost(async () => ({ kind: "allow" }));
+    await plugin(host.bb);
+
+    await host.harness.behavior.emitThreadEvent(
+      "turn.failed",
+      failure({ originPluginId: SENDER, errorInfo: null, rateLimits: null }),
+    );
+
+    expect(asked).toEqual([]);
+    expect(host.retries).toEqual([]);
     await host.harness.dispose();
   });
 });

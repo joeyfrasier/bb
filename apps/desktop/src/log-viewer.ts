@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawnHostProcess as spawn } from "@bb/process-utils";
+import type { ChildProcess } from "node:child_process";
 import { mkdir, readdir, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
@@ -19,7 +20,11 @@ export const LOG_VIEWER_IPC_BATCH_LINE_LIMIT = 250;
 
 const LOG_VIEWER_INITIAL_TAIL_LINES = 400;
 const LOG_VIEWER_ROTATION_POLL_INTERVAL_MS = 2_000;
-const LOG_VIEWER_COMPONENTS: LogViewerComponent[] = ["server", "host-daemon"];
+const LOG_VIEWER_COMPONENTS: LogViewerComponent[] = [
+  "desktop",
+  "server",
+  "host-daemon",
+];
 const PINO_LEVEL_LABELS = new Map<number, string>([
   [10, "trace"],
   [20, "debug"],
@@ -265,7 +270,7 @@ export function createLogViewerViewUrl(
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>bb - Server & Daemon Logs</title>
+  <title>bb - Local Logs</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -380,7 +385,7 @@ export function createLogViewerViewUrl(
 <body>
   <header>
     <div>
-      <h1>Server & Daemon Logs</h1>
+      <h1>Local Logs</h1>
       <div class="path" title="${escapedLogDir}">${escapedLogDir}</div>
     </div>
     <div class="actions">
@@ -528,9 +533,14 @@ export async function resolveCurrentLogFile(
     } catch {}
   }
 
+  const activeFileName = `${args.component}.log`;
   candidates.sort((left, right) => {
     if (left.timestampMs !== right.timestampMs) {
       return right.timestampMs - left.timestampMs;
+    }
+    const leftActive = left.fileName === activeFileName;
+    if (leftActive !== (right.fileName === activeFileName)) {
+      return leftActive ? -1 : 1;
     }
     if (left.sequence !== right.sequence) {
       return right.sequence - left.sequence;
@@ -708,6 +718,9 @@ export function createLogTailer(args: CreateLogTailerArgs): LogTailer {
         component: state.component,
         logDir: args.logDir,
       });
+      if (stopped) {
+        return;
+      }
       if (currentFilePath === null) {
         if (state.currentFilePath !== null) {
           stopTailProcess({ state });

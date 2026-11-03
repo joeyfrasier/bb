@@ -72,6 +72,106 @@ describe("NotificationHub", () => {
     expect(socket.messages).toHaveLength(0);
   });
 
+  it("watches a target from its first subscriber until its last one leaves", () => {
+    const hub = new NotificationHub();
+    const first = createMockHubSocket();
+    const second = createMockHubSocket();
+    const environment = {
+      kind: "environment-detail",
+      environmentId: "environment-1",
+    } as const;
+    const thread = { kind: "thread-detail", threadId: "thread-1" } as const;
+    const changes: unknown[] = [];
+    hub.onWatchedTargets(["environment-detail", "thread-detail"], (change) => {
+      changes.push(change);
+    });
+
+    hub.subscribe(first, environment);
+    hub.subscribe(second, { ...environment });
+    hub.subscribe(first, thread);
+    hub.subscribe(first, { kind: "project-detail", projectId: "project-1" });
+    hub.unsubscribe(first, environment);
+    expect(hub.listWatchedTargets("environment-detail")).toEqual([environment]);
+    hub.subscribe(second, thread);
+    hub.subscribe(second, { kind: "host-list" });
+    hub.unregisterClient(first);
+    hub.unregisterClient(second);
+
+    expect(changes).toEqual([
+      { started: [environment], stopped: [] },
+      { started: [thread], stopped: [] },
+      { started: [], stopped: [environment, thread] },
+    ]);
+    expect(hub.listWatchedTargets("environment-detail")).toEqual([]);
+    expect(hub.listWatchedTargets("thread-detail")).toEqual([]);
+  });
+
+  it("replays already watched targets to a late listener", () => {
+    const hub = new NotificationHub();
+    const socket = createMockHubSocket();
+    const target = {
+      kind: "thread-timeline",
+      threadId: "thread-1",
+      segmentLimit: null,
+      deferContent: false,
+    } as const;
+    hub.subscribe(socket, target);
+    hub.subscribe(socket, { kind: "thread-detail", threadId: "thread-1" });
+    const changes: unknown[] = [];
+
+    const stop = hub.onWatchedTargets(["thread-timeline"], (change) => {
+      changes.push(change);
+    });
+    stop();
+    hub.unregisterClient(socket);
+
+    expect(changes).toEqual([{ started: [target], stopped: [] }]);
+  });
+
+  it("watches only for visible clients while still routing changes to hidden ones", () => {
+    const hub = new NotificationHub();
+    const first = createMockHubSocket();
+    const second = createMockHubSocket();
+    const environment = {
+      kind: "environment-detail",
+      environmentId: "environment-1",
+    } as const;
+    const pullRequest = {
+      kind: "plugin-read",
+      pluginId: "bb--github-pr-status",
+      method: "pullRequests",
+      read: { key: "environment-1" },
+    } as const;
+    const changes: unknown[] = [];
+    hub.onWatchedTargets(["environment-detail", "plugin-read"], (change) => {
+      changes.push(change);
+    });
+
+    hub.subscribe(first, environment);
+    hub.subscribe(second, { ...environment });
+    hub.setClientVisible(first, false);
+    hub.setClientVisible(first, false);
+    expect(hub.listWatchedTargets("environment-detail")).toEqual([environment]);
+    hub.setClientVisible(second, false);
+    hub.subscribe(second, pullRequest);
+    hub.notifyEnvironment("environment-1", ["metadata-changed"]);
+    hub.setClientVisible(second, true);
+    hub.unregisterClient(second);
+    hub.unregisterClient(first);
+
+    expect(changes).toEqual([
+      { started: [environment], stopped: [] },
+      { started: [], stopped: [environment] },
+      { started: [environment, pullRequest], stopped: [] },
+      { started: [], stopped: [environment, pullRequest] },
+    ]);
+    for (const socket of [first, second]) {
+      expect(socket.messages.map((message) => JSON.parse(message))).toEqual([
+        expect.objectContaining({ entity: "environment", id: "environment-1" }),
+      ]);
+    }
+  });
+
   it("registers terminal clients and removes them when the socket disconnects", () => {
     const hub = new NotificationHub();
     const socket = createMockHubSocket();
@@ -267,6 +367,7 @@ describe("NotificationHub", () => {
         requestId: "rpc-1",
         command: {
           type: "provider.list_models",
+          contributedEnv: [],
           providerId: "codex",
           bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
         },
@@ -279,6 +380,7 @@ describe("NotificationHub", () => {
         requestId: "rpc-1",
         command: {
           type: "provider.list_models",
+          contributedEnv: [],
           providerId: "codex",
           bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
         },
@@ -320,6 +422,7 @@ describe("NotificationHub", () => {
         requestId: "rpc-1",
         command: {
           type: "provider.list_models",
+          contributedEnv: [],
           providerId: "codex",
           bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
         },
@@ -364,6 +467,7 @@ describe("NotificationHub", () => {
         requestId: "rpc-1",
         command: {
           type: "provider.list_models",
+          contributedEnv: [],
           providerId: "codex",
           bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
         },
@@ -398,6 +502,7 @@ describe("NotificationHub", () => {
           requestId: "rpc-1",
           command: {
             type: "provider.list_models",
+            contributedEnv: [],
             providerId: "codex",
             bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
           },
@@ -420,6 +525,7 @@ describe("NotificationHub", () => {
         requestId: "rpc-1",
         command: {
           type: "provider.list_models",
+          contributedEnv: [],
           providerId: "codex",
           bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
         },
@@ -467,6 +573,22 @@ describe("NotificationHub", () => {
       entity: "system",
       changes: ["config-changed"],
     });
+  });
+
+  it("stops delivering change notifications to clients once stopped", () => {
+    const hub = new NotificationHub();
+    const socket = createMockHubSocket();
+    const listener = vi.fn();
+    hub.onChangedMessage(listener);
+    hub.subscribe(socket, { kind: "system" });
+    hub.subscribe(socket, { kind: "host-list" });
+
+    hub.stopClientChangeNotifications();
+    hub.notifySystem(["provider-registrations-changed"]);
+    hub.notifyHost("host-1", ["provider-model-catalog-changed"]);
+
+    expect(socket.messages).toHaveLength(0);
+    expect(listener).toHaveBeenCalledTimes(2);
   });
 
   it("delivers host notifications to list and detail subscribers", () => {
@@ -721,7 +843,7 @@ describe("NotificationHub events-appended thread-list coalescing", () => {
     const otherDetailSocket = createMockHubSocket();
     const seen: string[][] = [];
     hub.onChangedMessage((message) => {
-      seen.push([...message.changes]);
+      if (message.entity === "thread") seen.push([...message.changes]);
     });
     hub.subscribe(detailSocket, {
       kind: "thread-detail",
@@ -757,10 +879,35 @@ describe("NotificationHub events-appended thread-list coalescing", () => {
     const hub = new NotificationHub();
     const seen: string[][] = [];
     hub.onChangedMessage((message) => {
-      seen.push([...message.changes]);
+      if (message.entity === "thread") seen.push([...message.changes]);
     });
     hub.notifyThread("thread-1", ["events-appended"]);
     hub.notifyThread("thread-1", ["events-appended"]);
     expect(seen).toEqual([["events-appended"], ["events-appended"]]);
   });
+});
+
+it("shares watched producers across sockets", () => {
+  const hub = new NotificationHub();
+  const a = createMockHubSocket();
+  const b = createMockHubSocket();
+  const changes = vi.fn();
+  const read = {
+    kind: "plugin-read",
+    pluginId: "demo",
+    method: "status",
+    read: { input: { a: 1, b: 2 } },
+  } as const;
+  const stop = hub.onWatchedTargets(["plugin-read"], changes);
+  hub.subscribe(a, read);
+  hub.subscribe(b, { ...read, read: { input: { b: 2, a: 1 } } });
+  expect(changes.mock.calls).toEqual([[{ started: [read], stopped: [] }]]);
+  hub.unsubscribe(a, read);
+  expect(changes).toHaveBeenCalledTimes(1);
+  hub.unregisterClient(b);
+  expect(changes.mock.calls).toEqual([
+    [{ started: [read], stopped: [] }],
+    [{ started: [], stopped: [read] }],
+  ]);
+  stop();
 });

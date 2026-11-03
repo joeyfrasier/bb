@@ -20,6 +20,7 @@ import {
 import {
   BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
   BB_DESKTOP_BROWSER_DETACH_CHANNEL,
+  BB_DESKTOP_BROWSER_SET_THREAD_DISCARDED_CHANNEL,
   BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
   BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
   BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
@@ -74,6 +75,14 @@ const electronMock = vi.hoisted(() => {
     isFullScreen: false,
   };
   const invokeCalls: string[] = [];
+  const localServerChoice = {
+    id: "builtin",
+    name: "Local",
+    origin: "http://127.0.0.1:38886",
+    kind: "local",
+    active: true,
+  };
+  const serverChoices = [localServerChoice];
   const listeners = new Map<string, IpcRendererListener>();
   const sendCalls: SendCall[] = [];
   let exposedApi: BbDesktopApi | null = null;
@@ -113,9 +122,10 @@ const electronMock = vi.hoisted(() => {
       invoke(channel: string): Promise<unknown> {
         invokeCalls.push(channel);
         if (channel === "bb-desktop:get-server-choices")
-          return Promise.resolve([
-            { id: "builtin", name: "Local", active: true },
-          ]);
+          return Promise.resolve(serverChoices);
+        if (channel === "bb-desktop:browser:list-threads-with-tabs") {
+          return Promise.resolve(["thread-1", "thread-2"]);
+        }
         if (channel === "bb-desktop:get-window-state") {
           return Promise.resolve(desktopWindowState);
         }
@@ -177,26 +187,32 @@ describe("desktop preload browser API", () => {
     api = await loadPreload();
   }, 30_000);
 
+  it("lists the same servers for current and older pages", async () => {
+    const local = await api.listServerChoices?.();
+    expect(local).toHaveLength(1);
+    expect(await api.getServerChoices?.()).toEqual(local);
+  });
+
   it("validates server updates and unsubscribes while sending only opaque selection IDs", async () => {
-    expect(await api.getServerChoices?.()).toEqual([
-      { id: "builtin", name: "Local", active: true },
-    ]);
+    const remote = {
+      id: "remote",
+      name: "Remote",
+      origin: "https://remote.example",
+      kind: "custom",
+      active: false,
+    };
     const updates = vi.fn();
     const stop = api.onServerChoicesChange?.(updates);
     emitIpcPayload({
       channel: "bb-desktop:server-choices-changed",
-      payload: [
-        { id: "remote", name: "Remote", active: false, url: "private" },
-      ],
+      payload: [{ ...remote, url: "https://user:password@remote.example" }],
     });
     expect(updates).not.toHaveBeenCalled();
     emitIpcPayload({
       channel: "bb-desktop:server-choices-changed",
-      payload: [{ id: "remote", name: "Remote", active: false }],
+      payload: [remote],
     });
-    expect(updates).toHaveBeenCalledWith([
-      { id: "remote", name: "Remote", active: false },
-    ]);
+    expect(updates).toHaveBeenCalledWith([remote]);
     stop?.();
     emitIpcPayload({
       channel: "bb-desktop:server-choices-changed",
@@ -254,6 +270,7 @@ describe("desktop preload browser API", () => {
       "goForward",
       "importCookies",
       "listImportSources",
+      "listThreadIdsWithTabs",
       "navigate",
       "onControl",
       "onFindResult",
@@ -268,6 +285,7 @@ describe("desktop preload browser API", () => {
       "releaseControl",
       "reload",
       "setBounds",
+      "setThreadDiscarded",
       "setVisible",
       "setVisibleWithoutFocus",
       "stop",
@@ -278,6 +296,11 @@ describe("desktop preload browser API", () => {
 
     api.browser.attach(attachRequest);
     api.browser.detach("browser:a");
+    api.browser.setThreadDiscarded?.({ threadId: "thread-1", discarded: true });
+    await expect(api.browser.listThreadIdsWithTabs?.()).resolves.toEqual([
+      "thread-1",
+      "thread-2",
+    ]);
     api.browser.navigate(navigateRequest);
     api.browser.goBack("browser:a");
     api.browser.goForward("browser:a");
@@ -303,6 +326,10 @@ describe("desktop preload browser API", () => {
       {
         channel: BB_DESKTOP_BROWSER_DETACH_CHANNEL,
         payload: { tabId: "browser:a" },
+      },
+      {
+        channel: BB_DESKTOP_BROWSER_SET_THREAD_DISCARDED_CHANNEL,
+        payload: { threadId: "thread-1", discarded: true },
       },
       {
         channel: BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,

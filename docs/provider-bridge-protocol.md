@@ -137,8 +137,11 @@ deltas and owns every timeline invariant:
   stream keys, parent refs, optional provider turn ids) and the assembler
   holds the bidirectional provider↔bb maps — both for scoping incoming
   deltas and for reverse-mapping bb ids on the command plane
-  (`turn/steer.expectedTurnId`, `thread/stop.activeTurnId`) and on
-  provider-native interaction requests (`providerNativeIds: true`). An
+  (`turn/steer.expectedTurnId`, `thread/stop.activeTurnId`). Bridges
+  send `interaction/request` and `item/tool/call` with the ids they put
+  on deltas: when the request names its `threadId`, the runtime maps its
+  `turnId`, approval subject `itemId`, and tool `callId` to the bb ids
+  minted for them, and passes through any id the assembler has not seen. An
   `interaction/request` carries an approval, a user question, or a
   plugin-defined request (`"<pluginId>/<name>"`); the resolution pairs with
   the payload kind ([provider-plugin-api.md](provider-plugin-api.md) §4).
@@ -146,11 +149,21 @@ deltas and owns every timeline invariant:
   (`claimIfIdle`), and accepted-input lifecycle settlement ever open a
   turn; item/stream deltas never do. Accepted input queues until a turn
   opens and drains into it.
+- **Held turns.** A bridge that keeps a logical turn open after the
+  provider's main run ended (Claude Code holds it while background agents
+  or workflows run) sends `turn.mainRun { state: "idle" }`, and
+  `turn.mainRun { state: "running" }` when the main run starts again. The
+  assembler records it as `turn/mainRun/updated` on the open turn. The
+  thread stays active, but the server delivers `queue-if-active` messages
+  into the held turn as steers instead of queueing them until the turn
+  completes.
 - **Item lifecycle.** Delta-first streams get a synthesized `item/started`;
   `item.close` always carries the full terminal item shape and is applied
   uniformly (paired close, reclassifying dual-settle, or bare
   close-without-open); repeated closes for a settled provider-identified
-  key are deduped and an explicit reopen reuses the same bb id.
+  key are deduped and an explicit reopen reuses the same bb id. A failed
+  `fileChange` close keeps its non-blank `resultText` as the item's
+  `error`, which the timeline shows before any proposed diff.
 - **Accumulation.** Streamed text, cumulative output snapshots (diffed into
   deltas/resets), and progress-event throttling.
 - **One streaming dialect.** Every text stream is an item keyed like every
@@ -262,7 +275,13 @@ The current grammar (`grammarVersions: [3, 3]`) includes:
   per-session settings other than model and reasoning level, each a `select`
   (`value`, `values`) or a `boolean`, with an optional `category` such as
   `mode` (the model picker, `bb thread options`; `mode` shows in the composer
-  footer). Latest snapshot wins: re-emit the whole list when it changes. The
+  footer). `bb/provider-model-catalog` carries
+  `{ models, selectedOnlyModels }` using the `model/list` result shape. A
+  bridge can publish the catalog its session just received, without another
+  discovery request. The server accepts it only for the current provider
+  thread identity, updates that provider's host/workspace catalog, and
+  invalidates connected model pickers immediately. Latest snapshot wins:
+  re-emit the whole list when it changes. The
   server alone writes `bb/session-option-selections` (choices the provider
   has not applied yet) and refuses it from a bridge.
 - **`sessionOptions`** (`{ [optionId]: string | boolean }`) on `thread/start`
@@ -303,6 +322,35 @@ and runs without injected skills, so a bridge that answers unknown methods
 with `METHOD_NOT_FOUND` still starts threads. The runtime never probes.
 Conformance rule `skills/configure-declared` pins both directions: declared →
 the request must succeed; undeclared → the request must be refused.
+
+### Command catalog
+
+`commands/list { cwd }` returns `{ commands: [{ name, description, inputHint? }] }`,
+the same shape as the `bb/provider-commands` thread state: the slash commands
+the provider offers in `cwd` before any thread runs there. The server merges
+them into the project command catalog (the new-thread composer's `/` menu,
+`bb project commands`), adding only names the native-root scan does not
+already list. The runtime sends it **only to a bridge whose handshake declares
+`commands: { list: true }`** and answers an empty list for any other bridge.
+Answer from the provider's own report without starting a model turn, and
+filter it with the same rules the bridge applies to `bb/provider-commands`, so
+a thread's menu does not change when its first turn starts. Conformance rule
+`commands/list-declared` pins both directions, as for `skills/configure`.
+
+For a new thread without a project, the server sends `provider.list_commands`
+with `cwd: null`. The host daemon probes from a dedicated empty
+`provider-command-catalog` directory under its data directory. The bridge still
+receives an absolute working directory, so global provider commands are available
+before a personal workspace exists. Selected projects use their workspace path.
+
+The server caches each answer per machine, provider, and working directory,
+because a cold answer waits on a login-shell refresh and a bridge start. For
+60 seconds the cached list is served as is. After that, a request still gets
+the cached list while the server asks again in the background. When the new
+answer differs, the server sends a `provider-commands-changed` host change so
+open composers refetch. A failed refresh keeps the previous list. The
+native-root scan and skill catalog are read on every request, so commands and
+skills added or edited on disk appear right away.
 
 ### Recovery hints
 
@@ -600,8 +648,10 @@ compares against that file when it exists. `pnpm parity --dump-dir <dir>`
 writes both legs' normalized event and row lists per cell.
 
 The conformance kit runs the same recordings as its recorded-traffic
-scenario set: `checkRecordedCellReplay` replays a bridge's cells and reports
+scenario set: `checkRecordedCellReplay` checks a bridge's replay results and reports
 `recorded/<cell>/{replays, events-schema-valid, grammar, turn-lifecycle,
 not-empty}` per cell. The pi, Claude Code, and Codex plugins' tests use only
 public dependencies, so `packages/provider-parity` replays their committed
-cells instead.
+cells instead. Its self-suite applies the recorded conformance checks to the
+same replay used for event and timeline parity, so each cell launches its
+bridge only once.

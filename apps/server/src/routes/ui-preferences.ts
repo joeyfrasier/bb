@@ -61,11 +61,14 @@ export function registerUiPreferenceRoutes(app: Hono, deps: AppDeps): void {
         { details: { currentRevision: result.revision } },
       );
     }
+    deps.hub.notifySystem(["ui-preferences-changed"]);
     return context.json({ key, ...result.entry });
   });
 
   del(routes.resetUiPreference, (context) => {
     const key = requireUiPreferenceKey(context.req.param("key"));
-    return context.json({ key, ...resetUiPreference(deps, key) });
+    const entry = resetUiPreference(deps, key);
+    deps.hub.notifySystem(["ui-preferences-changed"]);
+    return context.json({ key, ...entry });
   });
 }

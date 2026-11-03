@@ -11,6 +11,7 @@ import {
   listAllAutomations,
   listAutomationRuns,
   listAutomationsForProject,
+  listAutomationsTargetingThread,
   setAutomationEnabled,
   toAutomationResponse,
   toAutomationRunResponse,
@@ -43,9 +44,11 @@ import {
   type AutomationResponse,
   type AutomationScriptWorkingDirectory,
   type AutomationsOverviewResponse,
+  type ListAutomationsInput,
   type ResolvedCreateAutomationInput,
   type ResolvedAutomationRunsInput,
   type RunAutomationInput,
+  type ScriptExecutionUpdate,
   type UpdateAutomationInput,
 } from "./rpc-types.js";
 import {
@@ -62,6 +65,7 @@ import {
   writeInlineAutomationScript,
 } from "./script-files.js";
 import { errorMessage, executeAgentRun, executeScriptRun } from "./run.js";
+import type { ScriptRunScope } from "./script-runner.js";
 import {
   createScriptWorkingDirectoryResolver,
   projectPathForHost,
@@ -78,7 +82,7 @@ type ServiceApi = Pick<BbPluginApi, "realtime" | "log"> & {
 
 export interface AutomationService {
   overview(): Promise<AutomationsOverviewResponse>;
-  list(input: { projectId: string }): AutomationReadResult[];
+  list(input: ListAutomationsInput): AutomationReadResult[];
   get(input: {
     projectId: string;
     automationId: string;
@@ -200,6 +204,48 @@ async function resolveStoredExecution(args: {
     };
   }
   return { execution };
+}
+
+async function applyScriptExecutionUpdate(args: {
+  pluginDataDir: string;
+  automationId: string;
+  current: AutomationExecution;
+  update: ScriptExecutionUpdate;
+}): Promise<ResolvedStoredExecution> {
+  const { current, update } = args;
+  if (current.mode !== "script") {
+    throw new Error(
+      "Script execution options can only update script automations",
+    );
+  }
+  if (update.workingDirectory !== undefined) {
+    validateScriptWorkingDirectory(update.workingDirectory);
+  }
+  const { env: currentEnv, ...settings } = current;
+  const env = update.env ?? currentEnv;
+  const next = {
+    ...settings,
+    ...(update.interpreter !== undefined
+      ? { interpreter: update.interpreter }
+      : {}),
+    ...(update.timeoutMs !== undefined ? { timeoutMs: update.timeoutMs } : {}),
+    ...(update.workingDirectory !== undefined
+      ? { workingDirectory: update.workingDirectory }
+      : {}),
+    ...(env !== undefined && Object.keys(env).length > 0 ? { env } : {}),
+  };
+  if (update.script === undefined) return { execution: next };
+  const scriptFile = await writeInlineAutomationScript({
+    dataDir: args.pluginDataDir,
+    automationId: args.automationId,
+    content: update.script,
+    scriptFile: update.scriptFile ?? current.scriptFile,
+  });
+  const { script: _script, ...rest } = next;
+  return {
+    execution: { ...rest, scriptFile },
+    writtenScriptFile: scriptFile,
+  };
 }
 
 async function discardUncommittedScript(args: {
@@ -561,8 +607,9 @@ export function createAutomationService(args: {
   db: Db;
   pluginDataDir: string;
   serverUrl: string;
+  scriptRuns: ScriptRunScope;
 }): AutomationService {
-  const { bb, db, pluginDataDir, serverUrl } = args;
+  const { bb, db, pluginDataDir, serverUrl, scriptRuns } = args;
 
   return {
     async overview() {
@@ -583,7 +630,11 @@ export function createAutomationService(args: {
     },
 
     list(input) {
-      return listAutomationsForProject(db, input.projectId).map((row) =>
+      const rows =
+        "projectId" in input
+          ? listAutomationsForProject(db, input.projectId)
+          : listAutomationsTargetingThread(db, input.targetThreadId);
+      return rows.map((row) =>
         toStoredAutomationReadResult(bb, pluginDataDir, row),
       );
     },
@@ -740,16 +791,14 @@ export function createAutomationService(args: {
         patch.execution = updatedExecution;
       }
       if (input.script !== undefined) {
-        if (currentExecution.mode !== "script") {
-          throw new Error(
-            "Script execution options can only update script automations",
-          );
-        }
-        validateScriptWorkingDirectory(input.script.workingDirectory);
-        patch.execution = {
-          ...currentExecution,
-          workingDirectory: input.script.workingDirectory,
-        };
+        const stored = await applyScriptExecutionUpdate({
+          pluginDataDir,
+          automationId: current.id,
+          current: currentExecution,
+          update: input.script,
+        });
+        patch.execution = stored.execution;
+        stagedScriptFile = stored.writtenScriptFile;
       }
       if (
         "problem" in currentAutomation &&
@@ -897,6 +946,7 @@ export function createAutomationService(args: {
                 execution,
                 onFailure: closeFailedRun,
                 serverUrl,
+                scriptRuns,
                 resolveWorkingDirectory: createScriptWorkingDirectoryResolver({
                   sdk: bb.sdk,
                   pluginDataDir,

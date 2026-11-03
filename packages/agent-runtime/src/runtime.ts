@@ -9,6 +9,7 @@ import type { DynamicTool, InstructionMode, ThreadEvent } from "@bb/domain";
 import type { AdapterCommand } from "./provider-adapter.js";
 import {
   BRIDGE_JSON_RPC_ERRORS,
+  commandListResultSchema,
   providerHealthResultSchema,
   providerInstallationRunResultSchema,
   providerInstallationStatusSchema,
@@ -66,6 +67,7 @@ import type {
   ReapedIdleProviderSession,
 } from "./types.js";
 import {
+  resolveContributedEnvironment,
   resolveThreadEnvironment,
   type DroppedThreadEnvironmentContribution,
   type ResolvedThreadEnvironmentEntry,
@@ -2368,7 +2370,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       });
     },
 
-    async listModels({ providerId, bridgeLaunch, cwd }) {
+    async listModels({
+      providerId,
+      bridgeLaunch,
+      cwd,
+      selectedModel,
+      contributedEnv = [],
+    }) {
       await runtime.ensureProvider({ providerId, bridgeLaunch });
       const proc = providerProcesses.requireProviderProcess({
         processKey: resolveProviderProcessKey({ bridgeLaunch, providerId }),
@@ -2378,7 +2386,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         commandType: "model/list",
         plan: proc.adapter.buildCommandPlan({
           type: "model/list",
+          ...(selectedModel === undefined ? {} : { selectedModel }),
           ...(cwd !== undefined ? { cwd } : {}),
+          envVars: resolveContributedEnvironment(
+            contributedEnv,
+            options.shellEnv,
+          ),
         }),
         providerId,
       });
@@ -2388,6 +2401,26 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         resultSchema: ignoredJsonRpcResultSchema,
       });
       return proc.adapter.parseModelListResult(result);
+    },
+
+    async listCommands({ providerId, bridgeLaunch, cwd }) {
+      await runtime.ensureProvider({ providerId, bridgeLaunch });
+      const proc = providerProcesses.requireProviderProcess({
+        processKey: resolveProviderProcessKey({ bridgeLaunch, providerId }),
+        providerId,
+      });
+      const plan = proc.adapter.buildCommandPlan({
+        type: "commands/list",
+        cwd,
+      });
+      if (plan.kind === "noop") {
+        return { commands: [] };
+      }
+      return await sendCommand({
+        proc,
+        message: plan,
+        resultSchema: commandListResultSchema,
+      });
     },
 
     async providerHealth({ providerId, bridgeLaunch, cwd }) {

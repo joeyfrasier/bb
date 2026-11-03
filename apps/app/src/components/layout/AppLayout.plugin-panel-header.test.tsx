@@ -4,7 +4,7 @@ import {
   act,
   cleanup,
   fireEvent,
-  render,
+  render as renderReact,
   screen,
   waitFor,
 } from "@testing-library/react";
@@ -17,6 +17,12 @@ import {
   COMPACT_SHELF_HIDDEN_FIXED_CHROME_CLASS,
   setCompactSecondaryPanelPresentation,
 } from "@/components/ui/secondary-panel-shelf-visibility";
+
+import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
+
+function render(ui: ReactNode) {
+  return renderReact(ui, { wrapper: createQueryClientTestHarness().wrapper });
+}
 
 const viewportState = vi.hoisted(
   (): {
@@ -46,7 +52,6 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   useSystemConfig: () => ({
     data: {
       experiments: {
-        changelogPreview: false,
         serverMove: false,
         performanceDiagnostics: false,
         timelinePush: false,
@@ -115,6 +120,10 @@ vi.mock("@/components/thread/ThreadActionsProvider", () => ({
 
 vi.mock("@/components/plugin/PluginAppOverlays", () => ({
   PluginAppOverlays: () => <div data-testid="plugin-app-overlays" />,
+}));
+
+vi.mock("@/components/plugin/ThreadRowMetadataCollectors", () => ({
+  ThreadRowMetadataCollectors: () => null,
 }));
 
 vi.mock("@/components/dialogs/ProjectPathDialog", () => ({

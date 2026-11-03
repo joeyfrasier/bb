@@ -76,6 +76,8 @@ This index lists every command path that the core CLI registers, including alias
 - `bb provider disable`
 - `bb provider models`
 
+Use `--selected-model <model-id>` to discover its reasoning choices and include selected-only entries.
+
 ## machine
 
 - `bb machine`
@@ -188,6 +190,7 @@ This index lists every command path that the core CLI registers, including alias
 - `bb thread restore-environment`
 - `bb thread pin`
 - `bb thread unpin`
+- `bb thread regenerate-title`
 - `bb thread delete`
 - `bb thread edit-message`
 - `bb thread tell`
@@ -220,21 +223,10 @@ This index lists every command path that the core CLI registers, including alias
 - `bb environment cleanup`
 - `bb environment show`
 - `bb environment get`
-- `bb environment status`
-- `bb environment branches`
 - `bb environment paths`
-- `bb environment diff`
-- `bb environment diff-files`
-- `bb environment diff-file`
-- `bb environment diff-patch`
 - `bb environment update`
 - `bb environment commit`
 - `bb environment archive-threads`
-- `bb environment pull-request`
-- `bb environment pull-request show`
-- `bb environment pull-request ready`
-- `bb environment pull-request draft`
-- `bb environment pull-request merge`
 
 ## file
 

@@ -13,6 +13,7 @@ import {
   turnStartParamsSchema as canonicalTurnStartParamsSchema,
   turnSteerParamsSchema as canonicalTurnSteerParamsSchema,
   skillsConfigureParamsSchema,
+  commandListParamsSchema,
   bridgeRequestEnvelopeSchema,
   providerMaintenanceParamsSchema,
   providerInstallationRunParamsSchema,
@@ -55,7 +56,9 @@ export const claudeThreadStartParamsSchema = z.object({
   workflowsEnabled: z.boolean(),
   chromeEnabled: z.boolean(),
   disable1MContext: z.boolean(),
+  artifactsEnabled: z.boolean(),
   sandboxEnabled: z.boolean(),
+  fullAccessApprovalsEnabled: z.boolean(),
   memoryEnabled: z.boolean().optional(),
   providerSubagentsEnabled: z.boolean().optional(),
   instructionMode: bridgeInstructionModeSchema,
@@ -85,7 +88,9 @@ export const claudeTurnStartParamsSchema = z.object({
   workflowsEnabled: z.boolean().optional(),
   chromeEnabled: z.boolean().optional(),
   disable1MContext: z.boolean().optional(),
+  artifactsEnabled: z.boolean().optional(),
   sandboxEnabled: z.boolean().optional(),
+  fullAccessApprovalsEnabled: z.boolean().optional(),
   memoryEnabled: z.boolean().optional(),
   providerSubagentsEnabled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()).optional(),
@@ -108,6 +113,10 @@ const claudeCodeCommandSchema = z.discriminatedUnion("method", [
   z.object({
     method: z.literal("model/list"),
     params: z.object({}),
+  }),
+  z.object({
+    method: z.literal("commands/list"),
+    params: commandListParamsSchema,
   }),
   z.object({
     method: z.literal("provider/health"),

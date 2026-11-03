@@ -29,6 +29,7 @@ import {
   queuedMessageStateFor,
 } from "@bb/domain";
 import type {
+  QueuedMessageDeliveryMode,
   QueuedMessageLifecycleEventType,
   QueuedMessageLifecycleFrom,
   QueuedMessageState,
@@ -93,6 +94,7 @@ export interface CreateQueuedThreadMessageInput {
   payload: QueuedMessagePayload;
   /** Non-null only for one of core's own system notices. */
   systemNotice: QueuedMessageSystemNotice | null;
+  deliveryMode?: QueuedMessageDeliveryMode;
 }
 
 export interface UpdateQueuedThreadMessageInput {
@@ -847,6 +849,7 @@ export function createQueuedThreadMessageInTransaction(
       retryAttempt:
         input.payload.kind === "retry" ? input.payload.attempt : null,
       retryReason: input.payload.kind === "retry" ? input.payload.reason : null,
+      deliveryMode: input.deliveryMode ?? "steer",
       groupWithNext: false,
       claimedAt: null,
       claimToken: null,
@@ -1232,6 +1235,12 @@ export function claimQueuedThreadMessageGroup(
         return null;
       }
 
+      if (
+        policy.kind === "automatic" &&
+        hasClaimedQueuedThreadMessages(tx, existing.threadId)
+      ) {
+        return null;
+      }
       const queuedMessages = listQueuedThreadMessages(tx, existing.threadId);
       const group =
         partitionQueuedMessageGroups(queuedMessages).find((rows) =>
@@ -1286,6 +1295,9 @@ export function claimNextQueuedThreadMessageGroup(
       // behind it: the queue is a queue, not a pipeline. The one exception is
       // a group someone is editing: the drainable rows behind it wait for the
       // edit, so it still goes first once it is saved or cancelled.
+      if (hasClaimedQueuedThreadMessages(tx, threadId)) {
+        return null;
+      }
       const queuedMessages = listQueuedThreadMessages(tx, threadId);
       const pauseOrdinaryMessages = isThreadQueueAutoSendPaused(tx, threadId);
       const now = Date.now();

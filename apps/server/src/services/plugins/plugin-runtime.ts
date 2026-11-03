@@ -1,3 +1,16 @@
+import { capturePluginUse } from "./plugin-use-telemetry.js";
+import {
+  realtimeSubscriptionTargetKey,
+  type PluginReadSubscriptionTarget,
+  calculateExponentialBackoffDelay,
+  isPluginOwnedIconPath,
+  parseNamespacedGlyph,
+  PLUGIN_SDK_MAJOR,
+  PLUGIN_SDK_VERSION,
+  type Thread,
+  type ThreadQueuedMessage,
+} from "@bb/domain";
+import { logPluginBuildWarnings } from "./plugin-log.js";
 import type { MachineEnrollmentService } from "../machines/machine-services.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
@@ -12,29 +25,21 @@ import {
   realpathSync,
   type FSWatcher,
 } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire, registerHooks } from "node:module";
 import { performance } from "node:perf_hooks";
 import semver from "semver";
 import { HOST_ARTIFACT_MAX_BYTES } from "@bb/host-daemon-contract/protocol";
-import {
-  calculateExponentialBackoffDelay,
-  isPluginOwnedIconPath,
-  parseNamespacedGlyph,
-  PLUGIN_SDK_MAJOR,
-  PLUGIN_SDK_VERSION,
-  type Thread,
-  type ThreadQueuedMessage,
-} from "@bb/domain";
-import {
-  buildPluginApp,
-  buildPluginHost,
-  isIgnoredPluginDevPath,
-} from "@bb/plugin-build";
+import { buildPluginApp } from "@bb/plugin-build";
 import { PluginHostArtifactRegistry } from "./plugin-host-artifact-registry.js";
 import { getPluginBuildToolchain } from "./build-toolchain.js";
+import {
+  buildMutablePluginHost,
+  isMutableArtifactStale,
+  isMutablePluginHostReusable,
+} from "./mutable-plugin-artifacts.js";
 import { createNodeBbSdk, type BbSdk } from "@bb/sdk";
 import {
   getInstalledPlugin,
@@ -70,7 +75,10 @@ import type {
   PluginHookName,
   PluginSettingDescriptors,
 } from "@get-bb/plugin-sdk";
-import type { PluginHookRegistration } from "./plugin-hook-registry.js";
+import type {
+  PluginHookInvocation,
+  PluginHookRegistration,
+} from "./plugin-hook-registry.js";
 import type { PluginEnvironmentProviderRecord } from "./plugin-environment-provider-registry.js";
 import type { PluginMachineProviderRecord } from "./plugin-machine-provider-registry.js";
 import {
@@ -80,8 +88,8 @@ import {
 import {
   createPluginApi,
   isNeedsConfigurationError,
+  PluginContextStaleError,
   type BbPluginApi,
-  type PluginApiHandle,
   type PluginThreadEventName,
   type PluginThreadEventPayloads,
 } from "./plugin-api.js";
@@ -396,7 +404,6 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   const withArtifactLock = createKeyedLock<string>();
   const withPluginOperationLock = createKeyedLock<string>();
   const REGISTRATION_MUTATION_KEY = "plugin-registration-mutations";
-  const disposingPluginIds = new Set<string>();
   const builtinSourceWatchers: FSWatcher[] = [];
 
   const statuses = new Map<
@@ -558,9 +565,49 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     );
   }
 
+  const reportedStaleErrors = new WeakSet<PluginContextStaleError>();
+  const pluginCodeLocations = new Map<string, string>();
+
+  function pluginOwningStack(error: unknown): string | undefined {
+    if (!(error instanceof Error) || typeof error.stack !== "string") {
+      return undefined;
+    }
+    for (const [location, pluginId] of pluginCodeLocations) {
+      if (error.stack.includes(location)) return pluginId;
+    }
+    return undefined;
+  }
+
+  function reportStaleError(error: unknown): boolean {
+    if (!(error instanceof PluginContextStaleError)) return false;
+    if (!reportedStaleErrors.has(error)) {
+      reportedStaleErrors.add(error);
+      logger.warn(
+        { err: error },
+        `[plugin:${error.pluginId}] ${error.message}`,
+      );
+    }
+    return true;
+  }
+
+  function containPluginError(error: unknown): boolean {
+    if (reportStaleError(error)) return true;
+    const pluginId = pluginOwningStack(error);
+    if (pluginId === undefined) return false;
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(
+      { err: error },
+      `[plugin:${pluginId}] uncaught error: ${message}`,
+    );
+    if (statuses.get(pluginId)?.status === "running") {
+      setStatus(pluginId, "running", `uncaught error: ${message}`);
+    }
+    return true;
+  }
+
   function handleUncaughtException(error: unknown): boolean {
     const instance = serviceContext.getStore();
-    if (instance === undefined) return false;
+    if (instance === undefined) return containPluginError(error);
     const { id, service, controller } = instance;
     const name = service.record.name;
     const message = error instanceof Error ? error.message : String(error);
@@ -698,6 +745,13 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     );
   }
 
+  const recordOwners = new WeakMap<object, LoadedPlugin>();
+
+  function ownedRecord<R extends object>(record: R, owner: LoadedPlugin): R {
+    recordOwners.set(record, owner);
+    return record;
+  }
+
   /**
    * The handlers registered for one hook, in plugin install order (the `loaded`
    * map's insertion order, which is the order `listInstalledPlugins` returns).
@@ -708,7 +762,9 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     const registrations: PluginHookRegistration<K>[] = [];
     for (const [id, plugin] of loaded) {
       const handler = plugin.handle.hooks[hook];
-      if (handler !== null) registrations.push({ pluginId: id, handler });
+      if (handler !== null) {
+        registrations.push(ownedRecord({ pluginId: id, handler }, plugin));
+      }
     }
     return registrations;
   }
@@ -734,7 +790,10 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
             plugin,
             composition.icon,
           );
-          return { pluginId, composition, ...(icon === null ? {} : { icon }) };
+          return ownedRecord(
+            { pluginId, composition, ...(icon === null ? {} : { icon }) },
+            plugin,
+          );
         },
       ),
     );
@@ -763,11 +822,12 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           plugin,
           provider.icon,
         );
-        records.push({
-          pluginId,
-          provider,
-          ...(icon === null ? {} : { icon }),
-        });
+        records.push(
+          ownedRecord(
+            { pluginId, provider, ...(icon === null ? {} : { icon }) },
+            plugin,
+          ),
+        );
       }
     }
     return records;
@@ -789,10 +849,9 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
 
   function listPluginServerAccessProviders() {
     return [...loaded].flatMap(([pluginId, plugin]) =>
-      [...plugin.handle.serverAccessProviders.values()].map((provider) => ({
-        pluginId,
-        provider,
-      })),
+      [...plugin.handle.serverAccessProviders.values()].map((provider) =>
+        ownedRecord({ pluginId, provider }, plugin),
+      ),
     );
   }
 
@@ -818,63 +877,129 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return false;
   }
 
-  const pendingInvocations = new Map<string, Set<Promise<void>>>();
+  type PluginInvocationOutcome<T> =
+    | { ok: true; value: T }
+    | { ok: false; error: string; cause: unknown };
 
   async function invokeWrapped<T>(
-    id: string,
+    instance: LoadedPlugin,
     label: string,
-    run: () => T | Promise<T>,
-  ): Promise<
-    { ok: true; value: T } | { ok: false; error: string; cause: unknown }
-  > {
+    run: (signal: AbortSignal) => T | Promise<T>,
+    callerSignal?: AbortSignal,
+  ): Promise<PluginInvocationOutcome<T>> {
+    const id = instance.pluginId;
+    const released = instance.released.signal;
+    if (released.aborted) {
+      return {
+        ok: false,
+        error: `${label} not started: plugin "${id}" was reloaded or disabled`,
+        cause: undefined,
+      };
+    }
+    const lifetime = instance.stopping.signal.aborted
+      ? released
+      : instance.stopping.signal;
+    const signal =
+      callerSignal === undefined
+        ? lifetime
+        : AbortSignal.any([callerSignal, lifetime]);
     const stats = statsFor(id);
     const startedAt = performance.now();
-    let settle!: () => void;
-    const marker = new Promise<void>((resolveMarker) => {
-      settle = resolveMarker;
-    });
-    let pending = pendingInvocations.get(id);
-    if (!pending) {
-      pending = new Set();
-      pendingInvocations.set(id, pending);
-    }
-    pending.add(marker);
-    try {
-      return {
-        ok: true,
-        value: await runEventLoopWork(`plugin:${id} ${label}`, run),
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      stats.errorCount += 1;
-      logger.warn(`[plugin:${id}] ${label} failed: ${message}`);
-      if (statuses.get(id)?.status === "running") {
-        setStatus(id, "running", `${label} failed: ${message}`);
-      }
-      return { ok: false, error: message, cause: error };
-    } finally {
+    const execution = runEventLoopWork(`plugin:${id} ${label}`, () =>
+      run(signal),
+    );
+    const settled = execution.then(
+      () => undefined,
+      () => undefined,
+    );
+    instance.invocations.add(settled);
+    void settled.then(() => {
+      instance.invocations.delete(settled);
       const elapsedMs = performance.now() - startedAt;
       stats.count += 1;
       stats.totalMs += elapsedMs;
       if (elapsedMs > stats.maxMs) stats.maxMs = elapsedMs;
-      pending.delete(marker);
-      settle();
+    });
+    let releaseCaller: (() => void) | undefined;
+    const callerReleased = new Promise<never>((_resolve, reject) => {
+      releaseCaller = () =>
+        reject(
+          new Error(
+            `plugin "${id}" was reloaded or disabled before ${label} finished`,
+          ),
+        );
+      released.addEventListener("abort", releaseCaller, { once: true });
+    });
+    try {
+      return {
+        ok: true,
+        value: await Promise.race([execution, callerReleased]),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      stats.errorCount += 1;
+      if (!reportStaleError(error)) {
+        logger.warn(`[plugin:${id}] ${label} failed: ${message}`);
+        if (
+          loaded.get(id) === instance &&
+          statuses.get(id)?.status === "running"
+        ) {
+          setStatus(id, "running", `${label} failed: ${message}`);
+        }
+      }
+      return { ok: false, error: message, cause: error };
+    } finally {
+      if (releaseCaller !== undefined) {
+        released.removeEventListener("abort", releaseCaller);
+      }
+      void execution.catch((error: unknown) => {
+        if (released.aborted && !reportStaleError(error)) {
+          logger.warn(
+            `[plugin:${id}] ${label} failed after its caller was released: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
     }
   }
 
-  async function drainInvocations(id: string): Promise<void> {
-    const pending = pendingInvocations.get(id);
-    if (!pending || pending.size === 0) return;
+  async function invokeOwned<T>(
+    record: object,
+    label: string,
+    run: () => Promise<T>,
+  ): Promise<PluginHookInvocation<T>> {
+    const owner = recordOwners.get(record);
+    if (owner === undefined) {
+      return { ok: false, error: `${label} has no loaded plugin owner` };
+    }
+    const outcome = await invokeWrapped(owner, label, () => run());
+    return outcome.ok
+      ? { ok: true, value: outcome.value }
+      : { ok: false, error: outcome.error };
+  }
+
+  async function drainInvocations(instance: LoadedPlugin): Promise<void> {
+    if (instance.invocations.size === 0) return;
     const drained = await settledWithin(
-      Promise.all([...pending]),
+      Promise.all([...instance.invocations]),
       serviceStopTimeoutMs,
     );
     if (!drained) {
       logger.warn(
-        `plugin ${id}: ${pending.size} in-flight invocation(s) did not settle before dispose; proceeding`,
+        `plugin ${instance.pluginId}: ${instance.invocations.size} in-flight invocation(s) did not settle before dispose; releasing their callers`,
       );
     }
-    if (pending.size === 0) pendingInvocations.delete(id);
+  }
+
+  async function waitForWebSocketsClosed(
+    instance: LoadedPlugin,
+  ): Promise<void> {
+    const deadline = Date.now() + serviceStopTimeoutMs;
+    while (
+      instance.handle.websocketRoutes.some((route) => route.sockets.size > 0) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   /**
@@ -906,9 +1031,11 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       }
       if (payload === null) return;
       const delivered = payload;
-      for (const [id, plugin] of loaded) {
+      for (const plugin of loaded.values()) {
         for (const handler of [...plugin.handle.threadEventHandlers[event]]) {
-          void invokeWrapped(id, `${event} handler`, () => handler(delivered));
+          void invokeWrapped(plugin, `${event} handler`, () =>
+            handler(delivered),
+          );
         }
       }
     });
@@ -924,7 +1051,13 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
 
   function buildThreadDto(thread: Thread) {
     return toThreadResponseFromThread(
-      { db: deps.db, hub: deps.hub },
+      {
+        db: deps.db,
+        hub: deps.hub,
+        providerRegistry: deps.providerRegistry ?? {
+          supportsSessionRewind: () => false,
+        },
+      },
       { thread },
     );
   }
@@ -1065,43 +1198,6 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return true;
   }
 
-  async function isMutableAppBundleStale(rootDir: string): Promise<boolean> {
-    let artifactMtimeMs: number;
-    try {
-      artifactMtimeMs = (await stat(join(rootDir, "dist", "app.js"))).mtimeMs;
-    } catch {
-      return true;
-    }
-
-    const pendingDirectories = [""];
-    while (pendingDirectories.length > 0) {
-      const relativeDirectory = pendingDirectories.pop();
-      if (relativeDirectory === undefined) break;
-      const directory = join(rootDir, relativeDirectory);
-      let entries;
-      try {
-        const directoryStats = await stat(directory);
-        if (directoryStats.mtimeMs > artifactMtimeMs) return true;
-        entries = await readdir(directory, { withFileTypes: true });
-      } catch {
-        return true;
-      }
-
-      for (const entry of entries) {
-        const relativePath = join(relativeDirectory, entry.name);
-        if (isIgnoredPluginDevPath(relativePath)) continue;
-        try {
-          const entryStats = await stat(join(rootDir, relativePath));
-          if (entryStats.mtimeMs > artifactMtimeMs) return true;
-        } catch {
-          return true;
-        }
-        if (entry.isDirectory()) pendingDirectories.push(relativePath);
-      }
-    }
-    return false;
-  }
-
   type ResolvedServerEntry = {
     path: string;
     digest: string;
@@ -1172,7 +1268,13 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           },
         }),
       );
-      return { ...built, loader: "cjs" };
+      logPluginBuildWarnings({
+        dataDir: deps.dataDir,
+        logger,
+        pluginId: row.id,
+        warnings: built.warnings,
+      });
+      return { path: built.path, digest: built.digest, loader: "cjs" };
     }
     if (row.sourceKind === "path") return buildSource();
     if (
@@ -1240,18 +1342,24 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       const meta = await readPluginAppBundleMeta(row.rootDir);
       const sdkChanged = meta?.sdkVersion !== PLUGIN_SDK_VERSION;
       const sourceChanged =
-        !sdkChanged && (await isMutableAppBundleStale(row.rootDir));
+        !sdkChanged && (await isMutableArtifactStale(row.rootDir, "app"));
       if (sdkChanged || sourceChanged) {
         const reason = sdkChanged
           ? `built with SDK ${meta?.sdkVersion ?? "unknown"}, running SDK is ${PLUGIN_SDK_VERSION}`
           : "plugin source is newer than dist/app.js";
         logger.info(`plugin ${row.id}: rebuilding frontend bundle (${reason})`);
         try {
-          await buildPluginApp(
+          const app = await buildPluginApp(
             row.rootDir,
             deps.appVersion,
             await getPluginBuildToolchain(deps),
           );
+          logPluginBuildWarnings({
+            dataDir: deps.dataDir,
+            logger,
+            pluginId: row.id,
+            warnings: app.migrationWarnings,
+          });
           setDevBuildProblem(row.id, "frontend", null);
         } catch (error) {
           const message =
@@ -1287,12 +1395,24 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
         artifact: "host",
       })
     ) {
-      await buildPluginHost(
-        row.rootDir,
-        deps.appVersion,
-        await getPluginBuildToolchain(deps),
-      );
-      setDevBuildProblem(row.id, "host", null);
+      if (
+        !(await isMutablePluginHostReusable({
+          dataDir: deps.dataDir,
+          pluginId: row.id,
+          pluginVersion: manifest.version,
+          rootDir: row.rootDir,
+          bbVersion: deps.appVersion,
+        }))
+      ) {
+        await buildMutablePluginHost({
+          dataDir: deps.dataDir,
+          pluginId: row.id,
+          rootDir: row.rootDir,
+          bbVersion: deps.appVersion,
+          toolchain: await getPluginBuildToolchain(deps),
+        });
+        setDevBuildProblem(row.id, "host", null);
+      }
     }
     const jsPath = join(row.rootDir, "dist", "host.js");
     const metaPath = join(row.rootDir, "dist", "host.meta.json");
@@ -1467,13 +1587,22 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return `service ${[...hung].join(", ")} did not stop`;
   }
 
-  function discardCandidateHandle(handle: PluginApiHandle): void {
-    for (const database of handle.databaseHandles.splice(0)) {
+  function discardCandidate(candidate: LoadedPlugin): void {
+    candidate.stopping.abort();
+    try {
+      deps.pendingInteractions?.interruptOwnedPluginInteractions(candidate);
+    } catch (error) {
+      logger.warn(
+        `plugin ${candidate.pluginId} interaction cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    for (const database of candidate.handle.databaseHandles.splice(0)) {
       try {
         database.close();
       } catch {}
     }
-    handle.invalidate();
+    candidate.released.abort();
+    candidate.handle.invalidate();
   }
 
   function setLoadHold(hold: PluginLoadHold | null): void {
@@ -1620,7 +1749,9 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     const settingsDescriptorsRef: { current: PluginSettingDescriptors } = {
       current: {},
     };
+    const stopping = new AbortController();
     const handle = createPluginApi({
+      recordPluginUse: () => capturePluginUse(deps, row.id),
       pluginId: row.id,
       logger: deps.logger,
       db: deps.db,
@@ -1636,6 +1767,39 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       getAppUrl: deps.getAppUrl ?? (() => null),
       getLoopbackBaseUrl: () => boundLoopbackBaseUrl,
       rpcCaller: rpcCallers.issue(row.id),
+      invalidateRpc: (tags) => deps.hub.notifyPluginChanged(row.id, tags),
+      whileRpcWatched: (method, handler) => {
+        const active = new Map<string, AbortController>();
+        const isWatchedRead = (target: PluginReadSubscriptionTarget) =>
+          target.pluginId === row.id && target.method === method;
+        const stop = deps.hub.onWatchedTargets(["plugin-read"], (change) => {
+          for (const target of change.stopped.filter(isWatchedRead)) {
+            const key = realtimeSubscriptionTargetKey(target);
+            active.get(key)?.abort();
+            active.delete(key);
+          }
+          for (const target of change.started.filter(isWatchedRead)) {
+            const controller = new AbortController();
+            active.set(realtimeSubscriptionTargetKey(target), controller);
+            void Promise.resolve()
+              .then(() => {
+                if (!controller.signal.aborted)
+                  return handler(target.read, controller.signal);
+              })
+              .catch((error: unknown) => {
+                if (!controller.signal.aborted)
+                  deps.logger.warn(
+                    `Plugin ${row.id} watched RPC failed: ${String(error)}`,
+                  );
+              });
+          }
+        });
+        return () => {
+          stop();
+          for (const controller of active.values()) controller.abort();
+          active.clear();
+        };
+      },
       publishSignal: (channel, payload) => {
         deps.hub.notifyPluginSignal(row.id, channel, payload);
       },
@@ -1679,12 +1843,13 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
         if (!deps.pendingInteractions) {
           throw new Error("Plugin interactions are unavailable in this host");
         }
-        if (disposingPluginIds.has(row.id)) {
+        if (stopping.signal.aborted) {
           throw new Error(`plugin "${row.id}" is disposing`);
         }
         return deps.pendingInteractions.requestPluginInteraction({
           ...args,
           pluginId: row.id,
+          owner: plugin,
         });
       },
       ensureSharedPortTunnel: (hostId) => {
@@ -1709,6 +1874,20 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           ports,
         });
       },
+      setNextTunnels: (config) => {
+        if (!deps.sharedPorts) {
+          throw new Error("host shared-port control plane is unavailable");
+        }
+        deps.sharedPorts.setNextTunnelConfig(row.id, config);
+      },
+      nextTunnelStatuses: () =>
+        (deps.sharedPorts?.listNextTunnelStatuses() ?? []).map((entry) => ({
+          hostId: entry.hostId,
+          hostName: entry.hostName,
+          ...entry.status,
+        })),
+      onNextTunnelStatusChange: (listener) =>
+        deps.sharedPorts?.onNextTunnelStatusChange(listener) ?? (() => {}),
       replaceDeclaredSharedPorts: (declarations) => {
         if (declarations.length > 0 && !deps.sharedPorts) {
           throw new Error("host shared-port control plane is unavailable");
@@ -1729,6 +1908,12 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           ...args,
           artifact: hostArtifactCandidate,
         });
+      },
+      openTunnelIngress: (audience) => {
+        if (!deps.openTunnelIngress) {
+          throw new Error("tunnel ingress is unavailable in this plugin host");
+        }
+        return deps.openTunnelIngress(audience);
       },
       registerAiService: (declaration) =>
         deps.aiServices.register({
@@ -1764,6 +1949,17 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     settingsDescriptorsRef.current = handle.settings.descriptors;
     const rollbackGenerations: Array<() => void> = [];
     const candidateModuleRootUrls = new Set<string>();
+    const plugin: LoadedPlugin = {
+      pluginId: row.id,
+      manifest,
+      handle,
+      moduleRootUrls: candidateModuleRootUrls,
+      services: [],
+      hostArtifact: hostArtifactCandidate,
+      stopping,
+      released: new AbortController(),
+      invocations: new Set(),
+    };
     try {
       const serverEntry = await resolveServerEntry(row, manifest);
       if (row.sourceKind === "path" || row.sourceKind === "builtin") {
@@ -1782,6 +1978,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       let mod: { default?: unknown };
       if (serverEntry.loader === "cjs") {
         const filename = runtimeRequire.resolve(serverEntry.path);
+        pluginCodeLocations.set(filename, row.id);
         try {
           const exported: unknown = runtimeRequire(filename);
           mod =
@@ -1800,6 +1997,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
         );
         rollbackGenerations.push(mutation.rollback);
         candidateModuleRootUrls.add(mutation.rootUrl);
+        pluginCodeLocations.set(mutation.rootUrl, row.id);
         mod = (await import(pathToFileURL(serverEntry.path).href)) as {
           default?: unknown;
         };
@@ -1816,7 +2014,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       );
     } catch (error) {
       for (const rollback of rollbackGenerations.reverse()) rollback();
-      discardCandidateHandle(handle);
+      discardCandidate(plugin);
       let message = error instanceof Error ? error.message : String(error);
       if (/ERR_DLOPEN_FAILED|\.node/.test(message)) {
         message += " (native dependencies are not supported in BB plugins)";
@@ -1847,34 +2045,29 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           error instanceof Error ? error.message : String(error)
         }`;
       }
-      discardCandidateHandle(handle);
+      discardCandidate(plugin);
       setStatus(row.id, "error", hostArtifactProblem);
       logger.warn(`plugin ${row.id} failed to load: ${hostArtifactProblem}`);
       return hostArtifactProblem;
     }
-    const plugin: LoadedPlugin = {
-      manifest,
-      handle,
-      moduleRootUrls: candidateModuleRootUrls,
-      services: handle.backgroundServices.map((record) => ({
-        record,
-        state: "stopped" as const,
-        controller: null,
-        current: null,
-        restartTimer: null,
-        consecutiveCrashes: 0,
-        startedAt: 0,
-        disposed: false,
-      })),
-    };
+    plugin.services = handle.backgroundServices.map((record) => ({
+      record,
+      state: "stopped" as const,
+      controller: null,
+      current: null,
+      restartTimer: null,
+      consecutiveCrashes: 0,
+      startedAt: 0,
+      disposed: false,
+    }));
     if (previous !== undefined) {
-      await disposePluginInstance(row.id, previous);
+      await disposePluginInstance(previous);
       const hungAfterDispose = hungServices.get(row.id);
       if (hungAfterDispose !== undefined && hungAfterDispose.size > 0) {
         for (const rollback of rollbackGenerations.reverse()) rollback();
         loaded.delete(row.id);
         deps.sharedPorts?.clearDeclarationsForOwner(row.id);
-        discardCandidateHandle(handle);
+        discardCandidate(plugin);
         return hungServicesDetail(hungAfterDispose);
       }
       releaseMutableRoots(
@@ -1884,6 +2077,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       );
     }
     disposeUnavailableProviderRegistrations(row.id);
+    deps.hub.notifyPluginChanged(row.id, null);
     loaded.set(row.id, plugin);
     appBundles.set(row.id, appBundleCandidate.snapshot);
     if (hostArtifactCandidate === null) hostArtifacts.delete(row.id);
@@ -1924,19 +2118,16 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return null;
   }
 
-  async function disposePluginInstance(
-    id: string,
-    plugin: LoadedPlugin,
-  ): Promise<void> {
-    disposingPluginIds.add(id);
+  async function disposePluginInstance(plugin: LoadedPlugin): Promise<void> {
+    const id = plugin.pluginId;
     try {
       plugin.handle.closeWebSockets();
-      const hostArtifact = hostArtifacts.get(id);
-      if (hostArtifact !== undefined && deps.disposePluginHost) {
+      plugin.stopping.abort();
+      if (plugin.hostArtifact !== null && deps.disposePluginHost) {
         try {
           await deps.disposePluginHost({
             pluginId: id,
-            generation: hostArtifact.generation,
+            generation: plugin.hostArtifact.generation,
           });
         } catch (error) {
           logger.warn(
@@ -1946,13 +2137,14 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       }
       abortPluginToolCallsForPlugin(id, "plugin-disposed");
       try {
-        deps.pendingInteractions?.interruptPluginInteractions(id);
+        deps.pendingInteractions?.interruptOwnedPluginInteractions(plugin);
       } catch (error) {
         logger.warn(
           `plugin ${id} interaction cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       await stopServices(id, plugin);
+      await waitForWebSocketsClosed(plugin);
       for (const hook of [...plugin.handle.disposeHooks].reverse()) {
         try {
           await hook();
@@ -1962,7 +2154,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           );
         }
       }
-      await drainInvocations(id);
+      await drainInvocations(plugin);
       for (const database of plugin.handle.databaseHandles.splice(0)) {
         try {
           database.close();
@@ -1973,8 +2165,8 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
         }
       }
     } finally {
+      plugin.released.abort();
       plugin.handle.invalidate();
-      disposingPluginIds.delete(id);
     }
   }
 
@@ -1983,7 +2175,15 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     const plugin = loaded.get(id);
     if (!plugin) return;
     loaded.delete(id);
-    await disposePluginInstance(id, plugin);
+    deps.hub.notifyPluginChanged(id, null);
+    try {
+      deps.pendingInteractions?.interruptPluginInteractions(id);
+    } catch (error) {
+      logger.warn(
+        `plugin ${id} interaction cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await disposePluginInstance(plugin);
     releaseMutableRoots(plugin.moduleRootUrls);
     hostArtifacts.delete(id);
     deps.sharedPorts?.clearDeclarationsForOwner(id);
@@ -2024,7 +2224,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     }
     const value = find(plugin);
     if (value === undefined) return { outcome: "not-found" };
-    return { outcome: "found", value };
+    return { outcome: "found", value, owner: plugin };
   }
 
   function bindSdk(args: { baseUrl: string }): void {
@@ -2051,6 +2251,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     handlerStats,
     handleUncaughtException,
     hungServices,
+    invokeOwned,
     invokeWrapped,
     isBuiltinPluginId,
     isSafeModeExemptRow,

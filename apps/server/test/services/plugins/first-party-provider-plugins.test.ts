@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { listSystemProviderInfos } from "../../../src/services/system/execution-options.js";
-import { providerManagementCatalog } from "../../../src/services/system/provider-management.js";
 import {
   withTestHarness,
   type TestAppHarness,
@@ -120,11 +119,6 @@ const ALWAYS_VISIBLE_PROVIDER_IDS = FIRST_PARTY_PROVIDER_DECLARATIONS.filter(
   (plugin) => plugin.visibility === "always",
 ).map((plugin) => plugin.providerId);
 
-const NEW_ACP_PLUGIN_ID = "bb--provider-acp-next";
-const ACP_PROVIDER_IDS = FIRST_PARTY_PROVIDER_DECLARATIONS.filter(
-  (plugin) => plugin.builtinName === "provider-acp",
-).map((plugin) => plugin.providerId);
-
 function expectedLogoUrl(
   registry: TestAppHarness["deps"]["providerRegistry"],
   providerId: string,
@@ -153,7 +147,7 @@ async function installFirstPartyProviderPlugins(
 }
 
 describe("first-party provider plugins", () => {
-  it("are the sole source of the built-in providers", async () => {
+  it("registers the built-in providers with their client fields and restores their position after re-enabling", async () => {
     await withTestHarness(
       { seedFirstPartyProviders: false },
       async (harness) => {
@@ -217,15 +211,7 @@ describe("first-party provider plugins", () => {
             (plugin) => plugin.visibility === "always",
           ).map((plugin) => [plugin.providerId, plugin.fork !== "none"]),
         );
-      },
-    );
-  }, 60_000);
 
-  it("pins the client-read ProviderInfo fields of the four core providers", async () => {
-    await withTestHarness(
-      { seedFirstPartyProviders: false },
-      async (harness) => {
-        await installFirstPartyProviderPlugins(harness);
         const clientFields = (providerId: string) => {
           const info = harness.deps.providerRegistry.get(providerId)?.info;
           if (info === undefined) throw new Error(`${providerId} missing`);
@@ -359,16 +345,7 @@ describe("first-party provider plugins", () => {
             .get("codex")
             ?.info.serviceTiers?.map((tier) => tier.id),
         ).toEqual(["default", "fast", "ultrafast"]);
-      },
-    );
-  }, 60_000);
 
-  it("disabling a provider plugin removes its provider, and re-enabling restores its position", async () => {
-    await withTestHarness(
-      { seedFirstPartyProviders: false },
-      async (harness) => {
-        const registry = harness.deps.providerRegistry;
-        await installFirstPartyProviderPlugins(harness);
         expect(registry.get("pi")?.pluginId).toBe("provider-pi");
 
         await harness.pluginService.setEnabled("provider-pi", false);
@@ -387,8 +364,8 @@ describe("first-party provider plugins", () => {
           "acp-grok",
           "acp-hermes-agent",
         ]);
-        const infos = await listSystemProviderInfos(harness.deps, {});
-        expect(infos.find((info) => info.id === "pi")).toBeUndefined();
+        const remainingInfos = await listSystemProviderInfos(harness.deps, {});
+        expect(remainingInfos.find((info) => info.id === "pi")).toBeUndefined();
 
         await harness.pluginService.setEnabled("provider-pi", true);
         expect(registry.get("pi")?.pluginId).toBe("provider-pi");
@@ -398,60 +375,4 @@ describe("first-party provider plugins", () => {
       },
     );
   }, 60_000);
-  it("moves every ACP provider to the new adapter plugin when it is turned on, and back when it is turned off", async () => {
-    await withTestHarness(
-      { seedFirstPartyProviders: false },
-      async (harness) => {
-        const registry = harness.deps.providerRegistry;
-        const acpOwners = () =>
-          Object.fromEntries(
-            registry
-              .list()
-              .filter((entry) => entry.info.id.startsWith("acp-"))
-              .map((entry) => [entry.info.id, entry.pluginId]),
-          );
-        const owners = (pluginId: string) =>
-          Object.fromEntries(
-            ACP_PROVIDER_IDS.map((providerId) => [providerId, pluginId]),
-          );
-        const enabled = (pluginId: string) =>
-          harness.pluginService.list().find((plugin) => plugin.id === pluginId)
-            ?.enabled;
-        const settingsCatalog = () =>
-          providerManagementCatalog(harness.deps, harness.pluginService)
-            .filter((entry) => entry.id.startsWith("acp-"))
-            .map((entry) => [entry.id, entry.pluginId, entry.pluginEnabled]);
-
-        await installFirstPartyProviderPlugins(harness);
-        await harness.pluginService.install("builtin:provider-acp-next", {
-          kind: "root",
-        });
-        await harness.pluginService.setEnabled(NEW_ACP_PLUGIN_ID, false);
-        expect(acpOwners()).toEqual(owners("provider-acp"));
-
-        await harness.pluginService.setEnabled(NEW_ACP_PLUGIN_ID, true);
-        expect(acpOwners()).toEqual(owners(NEW_ACP_PLUGIN_ID));
-        expect(enabled("provider-acp")).toBe(false);
-        expect(settingsCatalog()).toEqual(
-          ACP_PROVIDER_IDS.map((providerId) => [
-            providerId,
-            NEW_ACP_PLUGIN_ID,
-            true,
-          ]),
-        );
-        expect(registry.get("codex")?.pluginId).toBe("provider-codex");
-
-        await harness.pluginService.setEnabled(NEW_ACP_PLUGIN_ID, false);
-        expect(acpOwners()).toEqual(owners("provider-acp"));
-        expect(enabled("provider-acp")).toBe(true);
-        expect(settingsCatalog()).toEqual(
-          ACP_PROVIDER_IDS.map((providerId) => [
-            providerId,
-            "provider-acp",
-            true,
-          ]),
-        );
-      },
-    );
-  }, 120_000);
 });

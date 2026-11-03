@@ -297,6 +297,20 @@ describe("options mapping", () => {
   });
 });
 
+describe("commands/list", () => {
+  it("is a noop until the handshake declares commands.list", () => {
+    const adapter = makeAdapter();
+    const command = { type: "commands/list" as const, cwd: "/workspace" };
+    expect(adapter.buildCommandPlan(command)).toMatchObject({ kind: "noop" });
+    completeHandshake(adapter, { commands: { list: true } });
+    expect(adapter.buildCommandPlan(command)).toMatchObject({
+      kind: "request",
+      method: "commands/list",
+      params: { cwd: "/workspace" },
+    });
+  });
+});
+
 describe("skills/configure", () => {
   it("is a noop until the handshake declares skills.configure", () => {
     const adapter = makeAdapter();
@@ -585,7 +599,7 @@ describe("provider-native id translation", () => {
     });
   });
 
-  it("maps providerNativeIds interaction requests onto assembler-minted ids", () => {
+  it("maps interaction request ids onto assembler-minted ids", () => {
     const adapter = makeAdapter();
     const events = feedDeltas(adapter, "t_1", [
       { kind: "turn.open", providerTurnId: "codex-turn-1" },
@@ -607,7 +621,6 @@ describe("provider-native id translation", () => {
       providerThreadId: "p_1",
       threadId: "t_1",
       turnId: "codex-turn-1",
-      providerNativeIds: true,
       payload: {
         kind: "approval",
         subject: {
@@ -632,18 +645,25 @@ describe("provider-native id translation", () => {
       payload: { subject: { itemId: bbItemId } },
     });
 
-    const unmarked = adapter.decodeInteractiveRequest?.({
+    const unknown = adapter.decodeInteractiveRequest?.({
       id: 12,
       method: "interaction/request",
-      params: { ...params, providerNativeIds: undefined },
+      params: {
+        ...params,
+        turnId: "unmapped-turn",
+        payload: {
+          ...params.payload,
+          subject: { ...params.payload.subject, itemId: "acp-permission" },
+        },
+      },
     });
-    expect(unmarked).toMatchObject({
-      turnId: "codex-turn-1",
-      payload: { subject: { itemId: "cmd-1" } },
+    expect(unknown).toMatchObject({
+      turnId: "unmapped-turn",
+      payload: { subject: { itemId: "acp-permission" } },
     });
   });
 
-  it("maps providerNativeIds tool-call requests onto assembler-minted ids", () => {
+  it("maps tool-call request ids onto assembler-minted ids", () => {
     const adapter = makeAdapter();
     const events = feedDeltas(adapter, "t_1", [
       { kind: "turn.open", providerTurnId: "codex-turn-1" },
@@ -671,7 +691,6 @@ describe("provider-native id translation", () => {
         callId: "dyn-1",
         tool: "bb_test_ping",
         arguments: {},
-        providerNativeIds: true,
       },
     });
     expect(decoded).toMatchObject({ turnId: bbTurnId, callId: bbItemId });

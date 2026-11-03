@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createStore } from "../api";
 import plugin from "../server";
 import { registerTasksCli } from "./index";
+import { attachmentsChangedTags } from "../shared/tags";
 
 vi.mock("../attachments", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../attachments")>();
@@ -1576,37 +1577,36 @@ describe("bb tasks CLI", () => {
                   : null,
           }),
         },
-        environments: {
-          pullRequest: async ({ environmentId }: { environmentId: string }) =>
-            environmentId === "env_absent"
-              ? { outcome: "absent" }
-              : {
-                  outcome: "available",
-                  pullRequest: {
-                    number: 12,
-                    title: "BB-15 Show PRs in tasks",
-                    state: "draft",
-                    url: "https://github.com/acme/bb/pull/12",
-                    baseRefName: "main",
-                    headRefName: "bb/bb-15",
-                    updatedAt: "2026-07-16T10:00:00.000Z",
-                    checks: {
-                      state: "pending",
-                      totalCount: 1,
-                      passedCount: 0,
-                      failedCount: 0,
-                      pendingCount: 1,
-                    },
-                    review: { state: "none", reviewRequestCount: 0 },
-                    mergeability: {
-                      state: "draft",
-                      mergeStateStatus: null,
-                      mergeable: null,
-                    },
-                    attention: "draft",
+        plugins: githubPrStatusRpc((environmentId) =>
+          environmentId === "env_absent"
+            ? { outcome: "absent" }
+            : {
+                outcome: "available",
+                pullRequest: {
+                  number: 12,
+                  title: "BB-15 Show PRs in tasks",
+                  state: "draft",
+                  url: "https://github.com/acme/bb/pull/12",
+                  baseRefName: "main",
+                  headRefName: "bb/bb-15",
+                  updatedAt: "2026-07-16T10:00:00.000Z",
+                  checks: {
+                    state: "pending",
+                    totalCount: 1,
+                    passedCount: 0,
+                    failedCount: 0,
+                    pendingCount: 1,
                   },
+                  review: { state: "none", reviewRequestCount: 0 },
+                  mergeability: {
+                    state: "draft",
+                    mergeStateStatus: null,
+                    mergeable: null,
+                  },
+                  attention: "draft",
                 },
-        },
+              },
+        ),
       },
     });
     await plugin(bb);
@@ -1676,12 +1676,10 @@ describe("bb tasks CLI", () => {
             environmentId: "env_down",
           }),
         },
-        environments: {
-          pullRequest: async () => ({
-            outcome: "unavailable",
-            message: "gh pr view failed: authentication required",
-          }),
-        },
+        plugins: githubPrStatusRpc(() => ({
+          outcome: "unavailable",
+          message: "gh pr view failed: authentication required",
+        })),
       },
     });
     await plugin(bb);
@@ -1772,7 +1770,7 @@ describe("bb tasks CLI", () => {
         isImage: false,
       });
 
-      const signalsBeforePng = harness.realtimeSignals.length;
+      const signalsBeforePng = harness.experimental_rpcInvalidations.length;
       const pngAttachment = JSON.parse(
         stdout(
           await harness.runCli([
@@ -1791,15 +1789,9 @@ describe("bb tasks CLI", () => {
         sizeBytes: 8,
         isImage: true,
       });
-      expect(harness.realtimeSignals.slice(signalsBeforePng)).toEqual([
-        {
-          channel: "tasks:changed",
-          payload: {
-            taskId: pngAttachment.taskId,
-            projectId: expect.any(String),
-          },
-        },
-      ]);
+      expect(
+        harness.experimental_rpcInvalidations.slice(signalsBeforePng),
+      ).toEqual([attachmentsChangedTags(pngAttachment.taskId, null)]);
 
       stdout(
         await harness.runCli([
@@ -1809,7 +1801,8 @@ describe("bb tasks CLI", () => {
           `![pixel](/api/v1/plugins/tasks/http/attachments/download?attachmentId=${pngAttachment.id})`,
         ]),
       );
-      const signalsBeforeReferencedRemove = harness.realtimeSignals.length;
+      const signalsBeforeReferencedRemove =
+        harness.experimental_rpcInvalidations.length;
       const referencedRemove = await harness.runCli([
         "attachment",
         "remove",
@@ -1819,7 +1812,7 @@ describe("bb tasks CLI", () => {
       expect(referencedRemove.stderr).toContain(
         "is used in the task description",
       );
-      expect(harness.realtimeSignals).toHaveLength(
+      expect(harness.experimental_rpcInvalidations).toHaveLength(
         signalsBeforeReferencedRemove,
       );
 
@@ -2358,3 +2351,17 @@ describe("bb tasks CLI", () => {
     await harness.dispose();
   });
 });
+
+function githubPrStatusRpc(lookup: (environmentId: string) => unknown) {
+  return {
+    async callRpc<TOutput>(args: {
+      input?: unknown;
+      outputSchema: { parse(value: unknown): TOutput };
+    }): Promise<TOutput> {
+      const { keys } = args.input as { keys: string[] };
+      return args.outputSchema.parse(
+        Object.fromEntries(keys.map((key) => [key, lookup(key)])),
+      );
+    },
+  };
+}

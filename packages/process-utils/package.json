@@ -7,26 +7,33 @@
       "source": "./src/index.ts",
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./host-process": {
+      "source": "./src/host-process.ts",
+      "types": "./src/host-process.ts",
+      "default": "./src/host-process.ts"
     }
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "clean": "rimraf dist src/generated tsconfig.tsbuildinfo",
+    "generate:profile-worker": "node scripts/generate-profile-worker.mjs",
     "lint": "oxlint src",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",
     "execa": "9.6.1",
-    "which-command": "0.1.0"
+    "which-command": "0.1.0",
+    "npm": "11.16.0"
   },
   "devDependencies": {
     "@bb/tsconfig": "workspace:*",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.0.0",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   }
 }

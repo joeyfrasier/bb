@@ -16,7 +16,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Disable provider subagents",
       description:
-        "Hide Claude Code's native Task tool so agents use bb for delegation.",
+        "Hide Claude Code's native subagent tools so agents use bb for delegation. Changes restart Claude before the next turn, preserving the conversation.",
       default: false,
     },
     workflowsDisabled: {
@@ -39,12 +39,26 @@ export default function plugin(bb: BbPluginApi) {
         "Start Claude Code with the Claude in Chrome browser tools. Needs the Chrome extension and a claude.ai login on the host.",
       default: false,
     },
+    artifactsEnabled: {
+      type: "boolean",
+      label: "Claude Artifacts",
+      description:
+        "Give Claude Code its Artifact tools to read, publish, and edit claude.ai artifacts. Claude may publish private pages to claude.ai without asking. Needs a claude.ai login on the host. Applies on the next turn.",
+      default: false,
+    },
     sandboxEnabled: {
       type: "boolean",
       label: "Claude Code sandbox",
       description:
         "Run Bash commands in Claude Code's sandbox in Accept Edits and Approve for me modes. Turn off to use Claude Code's own command approvals and sandbox settings instead.",
       default: true,
+    },
+    fullAccessApprovalsEnabled: {
+      type: "boolean",
+      label: "Approvals in Full Access",
+      description:
+        "Show Claude Code's own approval prompts in Full Access: permissions.ask rules, PreToolUse hooks that answer ask, and Claude Code's built-in safety checks. Off approves every request, so unattended threads never wait. Applies on the next turn.",
+      default: false,
     },
   });
 
@@ -107,7 +121,10 @@ export default function plugin(bb: BbPluginApi) {
         workflowsEnabled: context.settings.workflowsDisabled !== true,
         chromeEnabled: context.settings.chromeEnabled === true,
         disable1MContext: context.settings.disable1MContext === true,
+        artifactsEnabled: context.settings.artifactsEnabled === true,
         sandboxEnabled: context.settings.sandboxEnabled !== false,
+        fullAccessApprovalsEnabled:
+          context.settings.fullAccessApprovalsEnabled === true,
         ...(context.promptMode === "plan"
           ? { claudeCodePermissionMode: "plan" }
           : {}),

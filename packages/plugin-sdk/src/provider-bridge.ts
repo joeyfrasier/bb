@@ -89,6 +89,8 @@ export {
   threadDeltaNotificationParamsSchema,
   threadDeltaSchema,
   initializeParamsSchema,
+  commandListParamsSchema,
+  commandListResultSchema,
   modelListParamsSchema,
   providerHealthResultSchema,
   providerHealthSchema,
@@ -284,6 +286,7 @@ export {
   LOW_REASONING_EFFORT,
   MAX_REASONING_EFFORT,
   MEDIUM_REASONING_EFFORT,
+  PLUGIN_INTERACTION_MAX_TITLE_LENGTH,
   ULTRACODE_REASONING_EFFORT,
   USER_QUESTION_MAX_OPTIONS,
   USER_QUESTION_MAX_QUESTIONS,
@@ -424,3 +427,10 @@ export {
   type ContextCategory,
   type ContextEntry,
 } from "@bb/domain";
+
+export {
+  scanSkillFiles as experimental_scanSkillFiles,
+  selectedSkillMentions as experimental_selectedSkillMentions,
+  type SkillScanRoot as ExperimentalSkillScanRoot,
+  type IndexedSkillFile as ExperimentalIndexedSkillFile,
+} from "@bb/skill-index";

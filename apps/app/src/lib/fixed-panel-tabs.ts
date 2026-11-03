@@ -6,8 +6,7 @@ import {
   useRef,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { atom } from "jotai";
-import { useAtomValue, useSetAtom, useStore } from "jotai";
+import { atom, useAtomValue, useSetAtom, useStore } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { atomFamily } from "jotai-family";
 import type { TerminalCreateTarget } from "@bb/server-contract";
@@ -21,7 +20,6 @@ import {
 } from "@bb/client-core";
 import {
   EMPTY_FIXED_PANEL_TABS_STATE,
-  createGitDiffFixedPanelTab,
   createTerminalFixedPanelTab,
   createThreadInfoFixedPanelTab,
   ensureOpenFixedPanelHasActiveTab,
@@ -33,7 +31,7 @@ import {
   type FixedPanelTabsState,
   type FixedPanelViewTab,
 } from "./fixed-panel-tabs-state";
-import { type ThreadSecondaryPanel } from "./thread-secondary-panel";
+import type { ThreadSecondaryPanel } from "./thread-secondary-panel";
 import {
   areThreadTabListsEquivalent,
   hasPendingThreadTabsWrite,
@@ -63,7 +61,14 @@ type FixedPanelTerminalIdSetter = (
   terminalId: string,
   target?: TerminalCreateTarget,
 ) => void;
-type FixedPanelTerminalIdRemover = (terminalId: string) => void;
+type FixedPanelTerminalIdRemover = (
+  terminalId: string,
+) => RemovedTerminalTab | null;
+
+export interface RemovedTerminalTab {
+  index: number;
+  tab: FixedPanelTab;
+}
 
 function touchFixedPanelTabsState(
   state: FixedPanelTabsState,
@@ -112,14 +117,7 @@ function getFixedPanelTabsStateAtom(threadId: string | null | undefined) {
     : disabledFixedPanelTabsStateAtom;
 }
 
-function buildSecondaryPanelTab(panel: ThreadSecondaryPanel): FixedPanelTab {
-  if (panel === "git-diff") return createGitDiffFixedPanelTab();
-  return createThreadInfoFixedPanelTab();
-}
-
-function getSecondaryPanelTabId(panel: ThreadSecondaryPanel): string {
-  return buildSecondaryPanelTab(panel).id;
-}
+const SECONDARY_PANEL_TAB: FixedPanelTab = createThreadInfoFixedPanelTab();
 
 export function upsertTerminalTab(
   tabs: readonly FixedPanelTab[],
@@ -148,14 +146,53 @@ export function removeFixedRightTerminalTabInState(
   );
 }
 
+export function restoreFixedRightTerminalTabInState(
+  state: FixedPanelTabsState,
+  removed: RemovedTerminalTab,
+): FixedPanelTabsState {
+  if (state.secondary.tabs.some((tab) => tab.id === removed.tab.id)) {
+    return state;
+  }
+  const tabs = [...state.secondary.tabs];
+  tabs.splice(Math.min(removed.index, tabs.length), 0, removed.tab);
+  return setSecondaryPanelTabsInState({
+    state,
+    tabs,
+    activeTabId: state.secondary.activeTabId ?? removed.tab.id,
+    isOpen: state.secondary.isOpen || state.secondary.tabs.length === 0,
+  });
+}
+
+export function replaceFixedRightTerminalTabInState(
+  state: FixedPanelTabsState,
+  terminalId: string,
+  nextTerminalId: string,
+  target?: TerminalCreateTarget,
+): FixedPanelTabsState {
+  const replacedTabId = createTerminalFixedPanelTab({ terminalId }).id;
+  const nextTab = createTerminalFixedPanelTab({
+    terminalId: nextTerminalId,
+    target,
+  });
+  const tabs = state.secondary.tabs.some((tab) => tab.id === replacedTabId)
+    ? state.secondary.tabs.map((tab) =>
+        tab.id === replacedTabId ? nextTab : tab,
+      )
+    : upsertTerminalTab(state.secondary.tabs, nextTerminalId, target);
+  return setSecondaryPanelTabsInState({
+    state,
+    tabs,
+    activeTabId: nextTab.id,
+    isOpen: true,
+  });
+}
+
 function ensureSecondaryPanelTab(
   tabs: readonly FixedPanelTab[],
-  panel: ThreadSecondaryPanel,
 ): readonly FixedPanelTab[] {
-  const tabId = getSecondaryPanelTabId(panel);
-  return tabs.some((tab) => tab.id === tabId)
+  return tabs.some((tab) => tab.id === SECONDARY_PANEL_TAB.id)
     ? tabs
-    : [...tabs, buildSecondaryPanelTab(panel)];
+    : [...tabs, SECONDARY_PANEL_TAB];
 }
 
 function hasSecondaryPanelTab(
@@ -183,9 +220,8 @@ function openFixedSecondaryPanelState(
     };
   }
 
-  const panel: ThreadSecondaryPanel = "thread-info";
-  const tabs = ensureSecondaryPanelTab(current.secondary.tabs, panel);
-  const activeTabId = getSecondaryPanelTabId(panel);
+  const tabs = ensureSecondaryPanelTab(current.secondary.tabs);
+  const activeTabId = SECONDARY_PANEL_TAB.id;
   return {
     ...current,
     secondary: {
@@ -272,6 +308,19 @@ export function useFixedPanelTabsState(
       localTabs: state.secondary.tabs,
       server: tabsQuery.data,
     });
+    if (
+      !hasPendingThreadTabsWrite(queryClient, resolvedThreadId) &&
+      tabsQuery.data.tabs.some(
+        (tab) => tab.kind === "git-diff" || tab.kind === "thread-info",
+      )
+    ) {
+      scheduleThreadTabsPersistence({
+        queryClient,
+        threadId: resolvedThreadId,
+        previousTabs: state.secondary.tabs,
+        tabs: state.secondary.tabs,
+      });
+    }
     if (hydration?.kind === "migrate-local-tabs") {
       scheduleLocalThreadTabsMigration({
         queryClient,
@@ -292,6 +341,14 @@ export function useFixedPanelTabsState(
   ]);
 
   return state;
+}
+
+export function useGetFixedPanelTabsState(
+  panelStateId: FixedPanelTabsPanelStateId,
+): () => FixedPanelTabsState {
+  const stateAtom = getFixedPanelTabsStateAtom(panelStateId);
+  const store = useStore();
+  return useCallback(() => store.get(stateAtom), [stateAtom, store]);
 }
 
 export function applyFixedPanelTabsUpdate(
@@ -421,30 +478,27 @@ export function useSetFixedSecondaryPanelTab(
   syncThreadId: FixedPanelTabsSyncThreadId,
 ): FixedPanelSecondaryPanelSetter {
   const updateState = useUpdateFixedPanelTabsState(panelStateId, syncThreadId);
-  return useCallback(
-    (panel: ThreadSecondaryPanel) => {
-      updateState((current) => {
-        const tabs = ensureSecondaryPanelTab(current.secondary.tabs, panel);
-        const activeTabId = getSecondaryPanelTabId(panel);
-        if (
-          tabs === current.secondary.tabs &&
-          current.secondary.activeTabId === activeTabId &&
-          current.secondary.isOpen
-        ) {
-          return current;
-        }
-        return {
-          ...current,
-          secondary: {
-            tabs,
-            activeTabId,
-            isOpen: true,
-          },
-        };
-      });
-    },
-    [updateState],
-  );
+  return useCallback(() => {
+    updateState((current) => {
+      const tabs = ensureSecondaryPanelTab(current.secondary.tabs);
+      const activeTabId = SECONDARY_PANEL_TAB.id;
+      if (
+        tabs === current.secondary.tabs &&
+        current.secondary.activeTabId === activeTabId &&
+        current.secondary.isOpen
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        secondary: {
+          tabs,
+          activeTabId,
+          isOpen: true,
+        },
+      };
+    });
+  }, [updateState]);
 }
 
 export function useCloseFixedSecondaryPanel(
@@ -495,13 +549,21 @@ export function useRemoveFixedRightTerminalTab(
   const updateState = useUpdateFixedPanelTabsState(panelStateId, syncThreadId);
   return useCallback(
     (terminalId: string) => {
+      const result: { removed: RemovedTerminalTab | null } = { removed: null };
       let isPanelEmpty = false;
       updateState((current) => {
+        const tabId = createTerminalFixedPanelTab({ terminalId }).id;
+        const index = current.secondary.tabs.findIndex(
+          (tab) => tab.id === tabId,
+        );
+        const tab = current.secondary.tabs[index];
+        result.removed = tab === undefined ? null : { index, tab };
         const next = removeFixedRightTerminalTabInState(current, terminalId);
         isPanelEmpty = next.secondary.tabs.length === 0;
         return next;
       });
       if (isPanelEmpty) onCloseLastTab?.();
+      return result.removed;
     },
     [onCloseLastTab, updateState],
   );

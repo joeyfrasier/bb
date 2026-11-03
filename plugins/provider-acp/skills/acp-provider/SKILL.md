@@ -11,6 +11,18 @@ host: `opencode`, `omp`, `grok`, and `hermes` appear as `acp-opencode`, `acp-omp
 `bb provider list` and `bb provider models <provider-id>` using its environment
 or machine selector.
 
+Agents in the official ACP registry can be added without writing JSON.
+`bb acp registry [--refresh] [--json]` lists them with a status: `available`,
+`added`, `update available`, `built in` (bb already ships it), or
+`manual install` (the agent ships only as a downloadable binary).
+`bb acp add <agent-id>` adds the agent as provider `acp-<agent-id>`, or moves an
+added agent to the registry's current version while keeping the fields edited
+by hand. `bb acp remove <agent-id>` removes it. The plugin's settings page shows
+the same list. An added agent is an entry in the `Custom agents` setting that
+runs `npx -y <package>` or `uvx <package>` on the thread's host, so the host
+needs Node.js or uv. The list is cached for six hours; when the registry cannot
+be reached the saved copy is shown with the reason.
+
 To hide a detected ACP agent, use `bb provider disable acp-opencode`, or Disable
 on Settings → Providers. Restore it with `bb provider enable acp-opencode`.
 This leaves other ACP agents and the host CLI intact. Disabled agents skip
@@ -29,15 +41,20 @@ bb thread spawn --provider acp-opencode --model <provider/model>
 ```
 
 OpenCode agents are session modes, not models selectable through BB's model
-field. OpenCode reports its primary agents as the `mode` session option,
-including custom agents from the OpenCode config directory and from the
-project's `.opencode/` directory, so project agents appear when the list is
-read for that project or environment:
+field. OpenCode reports its primary agents as the `mode` session option. BB
+asks OpenCode for its models and modes in the directory the thread will run
+in: the project's checkout for a new thread, the environment's directory
+otherwise. Custom agents from the OpenCode config directory and from the
+project's `.opencode/` directory therefore appear in the mode menu:
 
 ```sh
 bb provider models acp-opencode --project "$BB_PROJECT_ID"
 bb thread spawn --provider acp-opencode --option mode=<agent>
 ```
+
+A new agent file shows up once the stored list is ten minutes old and is read
+again. The same holds for a custom agent with `dialect: "opencode"`; every
+other ACP agent is asked once per machine.
 
 bb lists only the agents OpenCode itself loads, and OpenCode does not read
 agent files from other folders such as `.agents/agents/`. To use such a folder,
@@ -62,9 +79,36 @@ values. Native questions have no ACP interaction handler in BB; agents use the
 ask-user-question plugin’s `AskUserQuestion` tool instead. This also applies to
 custom agents with `dialect: "opencode"` and does not change OpenCode config files.
 
+BB also sets `OPENCODE_PERMISSION` from the thread's permission mode, which
+OpenCode merges over the `permission` keys of its own config. In `accept-edits`
+OpenCode edits files without asking and asks before shell commands, web fetches
+and paths outside the workspace; BB shows those requests as approvals. In `full`
+all four are allowed. Changing a thread's permission mode restarts the OpenCode
+session with the new policy; the conversation is restored.
+
 OpenCode and Grok ACP support the core `bb thread compact` command; Cursor ACP
 does not expose compatible compaction. Check the actual agent's capabilities
 before attempting provider-specific recovery.
+
+BB reuses the initial model's advertised reasoning choices and probes other
+models within a five-second budget, trying configured priority models first.
+Selecting an unprobed model starts a separate discovery session that probes only
+that model, with a five-second timeout. Results are cached by model. While
+loading, or after failure or an unrecognized response, BB shows no reasoning
+selector. Sending never waits for discovery: when a model's catalog entry does
+not list the thread's reasoning level, BB leaves reasoning out of the request and
+the agent keeps its own setting. CLI and SDK reasoning preferences stay stored.
+Failed probes have a 30-second server retry cooldown; a probe the agent answers
+without levels is not repeated until the catalog is refreshed. Discovered levels
+survive later catalog refreshes. Individual probe failures do not stop bulk
+discovery of other models. In `bb provider models
+<provider-id> --json`, `reasoningDiscovery: "unknown"` means BB has not
+discovered the model's levels yet; `"known"` with an empty
+`supportedReasoningEfforts` means the model has no selectable levels, not that
+it cannot reason. Use `bb provider models <provider-id> --selected-model <model-id>
+--json` (SDK: `providers.models({ providerId, selectedModel })`) to request
+the same discovery without the picker. Refresh the catalog after changing the
+agent's default or priority models. This does not require omp's proposed `_meta.thoughtLevels` extension.
 
 OpenCode Go subscription usage is available in Provider usage when the selected
 machine has OpenCode installed and a Go subscription. Sign in to Go in OpenCode
@@ -74,11 +118,15 @@ on that machine, then refresh its OpenCode tab. Verify with
 BB reports Go's five-hour, weekly, and monthly usage and reset times, not local
 session token totals or other OpenCode providers' subscriptions.
 
-The collector checks `OPENCODE_API_KEY`, then the active official Console account
-and organization in `$XDG_DATA_HOME/opencode/opencode.db`, then active v2
-`credential` table API keys or official Console OAuth credentials
-(`opencode-go` before `opencode`), then
-`OPENCODE_AUTH_CONTENT` or `$XDG_DATA_HOME/opencode/auth.json`.
+The collector checks `OPENCODE_API_KEY` first. For an OpenCode 2 database at
+`$XDG_DATA_HOME/opencode/opencode.db`, it then reads the `credential` table API
+key or official Console OAuth credential that OpenCode selects for each
+integration (`opencode-go` before `opencode`). Otherwise it reads the active
+official Console account and organization in that database, then
+`OPENCODE_AUTH_CONTENT` or `$XDG_DATA_HOME/opencode/auth.json`. OpenCode 2
+imports `auth.json` once when it upgrades an OpenCode 1 database and never reads
+`auth.json`, `OPENCODE_AUTH_CONTENT`, or the OpenCode 1 Console account, so the
+collector reads them only when there is no OpenCode 2 database.
 The default data directory is `~/.local/share/opencode`. Database storage is read
 only; expired Console sessions must be refreshed by OpenCode. V2 OAuth requires
 the device login method and account/organization metadata for the official
@@ -94,9 +142,10 @@ states rather than zero usage. Never print API keys when diagnosing setup.
 
 Register another ACP agent in the ACP providers plugin's `customAgents`
 setting, a JSON array:
-`bb plugin config provider-acp set customAgents '[...]'`. The plugin
-re-registers its providers as soon as the setting changes; no restart is
-needed.
+`bb plugin config provider-acp set customAgents '[...]'`. Agents from the
+official ACP registry are added to the same setting by `bb acp add <agent-id>`.
+The plugin re-registers its providers as soon as the setting changes; no
+restart is needed.
 
 - Required: `id` (lowercase letters, digits, and dashes; permanent),
   `displayName`, and `command`. The provider id is `acp-<id>`. `cursor` is

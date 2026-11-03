@@ -1,8 +1,11 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
+  SERVER_CREDENTIAL_CACHE_TTL_MS,
   SERVER_OFFLINE_AFTER_MS,
+  ServerCredentialCache,
   isLive,
+  nextTunnelConnected,
   schema,
   server,
   sha256Hex,
@@ -25,34 +28,15 @@ import { jsonResponse, methodNotAllowed } from "./json-response.js";
 import { MACHINE_CREDENTIAL_HEADER } from "./protocol-headers.js";
 import type { Env } from "./tunnel-do.js";
 
-const serverCredentialCache = new Map<
-  string,
-  { value: string | null; expires: number }
->();
-const SERVER_CRED_TTL_MS = 20_000;
+const serverCredentials = new ServerCredentialCache(
+  SERVER_CREDENTIAL_CACHE_TTL_MS,
+);
 
 export async function verifyServerCredential(
   credential: string,
   db: ConnectDb,
 ): Promise<string | null> {
-  if (!credential) return null;
-  const now = Date.now();
-  const cached = serverCredentialCache.get(credential);
-  if (cached && cached.expires > now) return cached.value;
-  if (cached) serverCredentialCache.delete(credential);
-
-  const hash = await sha256Hex(credential);
-  const row = await db
-    .select({ userId: server.userId })
-    .from(server)
-    .where(and(eq(server.credentialHash, hash), isNull(server.revokedAt)))
-    .get();
-  const userId = row?.userId ?? null;
-  serverCredentialCache.set(credential, {
-    value: userId,
-    expires: now + SERVER_CRED_TTL_MS,
-  });
-  return userId;
+  return (await serverCredentials.resolve(db, credential))?.userId ?? null;
 }
 
 export async function revokeServerCredential(
@@ -71,7 +55,7 @@ export async function revokeServerCredential(
     )
     .returning({ subdomain: server.subdomain })
     .get();
-  serverCredentialCache.delete(presented);
+  serverCredentials.forget(presented);
   invalidateDesktopSessionGrant({ kind: "server", credentialHash });
   return revoked ?? null;
 }
@@ -130,6 +114,8 @@ export async function listAccountServers(
       lastSeenAt: server.lastSeenAt,
       credentialHash: server.credentialHash,
       revokedAt: server.revokedAt,
+      nextTunnelGate: server.nextTunnelGate,
+      nextTunnelAt: server.nextTunnelAt,
     })
     .from(server)
     .where(eq(server.userId, userId))
@@ -143,13 +129,14 @@ export async function listAccountServers(
       const connected = row.credentialHash != null && row.revokedAt == null;
       const live =
         connected &&
-        isLive({
-          lastSeenMs: row.lastSeenAt?.getTime() ?? null,
-          now,
-          offlineAfterMs: SERVER_OFFLINE_AFTER_MS,
-          tunnelConnected:
-            tunnelConnected === null ? null : await tunnelConnected(handle),
-        });
+        (nextTunnelConnected(row, now) ||
+          isLive({
+            lastSeenMs: row.lastSeenAt?.getTime() ?? null,
+            now,
+            offlineAfterMs: SERVER_OFFLINE_AFTER_MS,
+            tunnelConnected:
+              tunnelConnected === null ? null : await tunnelConnected(handle),
+          }));
       return { handle, name, live };
     }),
   );

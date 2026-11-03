@@ -30,6 +30,8 @@ const updateTarget: ProjectPathDialogTarget = {
   projectId: PROJECT_IDS.bb,
   projectName: PROJECT_NAMES.bb,
   currentPath: "/Users/michael/Projects/bb",
+  hostId: HOST_IDS.local,
+  hostName: HOST_NAMES.local,
 };
 
 const addSourceTarget: ProjectPathDialogTarget = {
@@ -55,7 +57,12 @@ const longProjectPath = `/home/winter/${longProjectName}`;
 const longFileName = `${"appdata-buzz-pre-sandbox-migration-".repeat(8)}.tar.gz`;
 const longFolderName = "long-folder-name-without-natural-breaks-".repeat(8);
 
-function createLongNamesQueryClient() {
+const windowsMachine = makeHost({
+  id: "host_windows_drives",
+  name: "Sawyer's PC",
+});
+
+function createBrowsedFoldersQueryClient() {
   const queryClient = createAppQueryClient({
     showMutationErrorToasts: false,
     defaultOptions: {
@@ -89,13 +96,49 @@ function createLongNamesQueryClient() {
           path: `${longProjectPath}/src`,
         },
       ],
+      roots: ["/"],
+    },
+  );
+  queryClient.setQueryData<HostDirectoryListing>(
+    hostDirectoryQueryKey(HOST_IDS.local, "/Users/michael/Projects/bb"),
+    {
+      directory: "/Users/michael/Projects/bb",
+      parent: "/Users/michael/Projects",
+      entries: [
+        {
+          kind: "directory",
+          name: "apps",
+          path: "/Users/michael/Projects/bb/apps",
+        },
+        {
+          kind: "directory",
+          name: "packages",
+          path: "/Users/michael/Projects/bb/packages",
+        },
+      ],
+      roots: ["/"],
+    },
+  );
+  queryClient.setQueryData<HostDirectoryListing>(
+    hostDirectoryQueryKey(windowsMachine.id, null),
+    {
+      directory: "C:\\Users\\sawyer",
+      parent: "C:\\Users",
+      entries: [
+        {
+          kind: "directory",
+          name: "Projects",
+          path: "C:\\Users\\sawyer\\Projects",
+        },
+      ],
+      roots: ["C:\\", "G:\\", "H:\\"],
     },
   );
   return queryClient;
 }
 
 export function Overview() {
-  const queryClient = useMemo(() => createLongNamesQueryClient(), []);
+  const queryClient = useMemo(() => createBrowsedFoldersQueryClient(), []);
   return (
     <StoryCard>
       <StoryRow
@@ -115,18 +158,20 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="update"
-        hint='kind="update" — prefilled with currentPath, submit reads "Save path"'
+        hint='kind="update" — browses the checkout machine from currentPath, submit reads "Save path"'
       >
-        <DialogStage>
-          <ProjectPathDialogContent
-            target={updateTarget}
-            pending={false}
-            platform="darwin"
-            hostId={null}
-            hostName="Sawyer's MacBook"
-            onSubmit={noop}
-          />
-        </DialogStage>
+        <QueryClientProvider client={queryClient}>
+          <DialogStage>
+            <ProjectPathDialogContent
+              target={updateTarget}
+              pending={false}
+              platform="darwin"
+              hostId={null}
+              hostName={null}
+              onSubmit={noop}
+            />
+          </DialogStage>
+        </QueryClientProvider>
       </StoryRow>
       <StoryRow
         label="add-source"
@@ -208,6 +253,24 @@ export function Overview() {
         </QueryClientProvider>
       </StoryRow>
       <StoryRow
+        label="windows drives"
+        hint="regression for #5358 — the drive crumb opens a menu of every mounted drive"
+      >
+        <QueryClientProvider client={queryClient}>
+          <DialogStage>
+            <ProjectPathDialogContent
+              target={createTarget}
+              pending={false}
+              platform="win32"
+              hostId={windowsMachine.id}
+              hostName={windowsMachine.name}
+              hosts={[windowsMachine]}
+              onSubmit={noop}
+            />
+          </DialogStage>
+        </QueryClientProvider>
+      </StoryRow>
+      <StoryRow
         label="machines all offline"
         hint="no machine can be browsed — no row is selected and submit stays disabled"
       >
@@ -227,16 +290,18 @@ export function Overview() {
         label="pending"
         hint="submit in flight — input + submit disabled"
       >
-        <DialogStage>
-          <ProjectPathDialogContent
-            target={updateTarget}
-            pending
-            platform="darwin"
-            hostId={null}
-            hostName="Sawyer's MacBook"
-            onSubmit={noop}
-          />
-        </DialogStage>
+        <QueryClientProvider client={queryClient}>
+          <DialogStage>
+            <ProjectPathDialogContent
+              target={updateTarget}
+              pending
+              platform="darwin"
+              hostId={null}
+              hostName={null}
+              onSubmit={noop}
+            />
+          </DialogStage>
+        </QueryClientProvider>
       </StoryRow>
     </StoryCard>
   );

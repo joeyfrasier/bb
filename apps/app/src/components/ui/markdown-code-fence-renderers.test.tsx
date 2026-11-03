@@ -112,7 +112,6 @@ function hostedMarkdown(
     <CodeFenceRendererHost
       registry={registry}
       message={MESSAGE}
-      openThreadPanel={null}
       streaming={streaming}
     >
       <MarkdownPreview content={content} />
@@ -168,7 +167,7 @@ describe("code fence renderers in assistant messages", () => {
     expect(first?.getAttribute("data-project-id")).toBe("proj_a");
     expect(view.container.textContent).toContain("const between = 1;");
     expect(
-      view.container.querySelectorAll('button[aria-label="Wrap long lines"]'),
+      view.container.querySelectorAll('button[aria-label="Wrap lines"]'),
     ).toHaveLength(1);
   });
 
@@ -323,10 +322,10 @@ describe("code fence renderers in assistant messages", () => {
     view.rerender(assistantMessage(registry, "Plain prose only."));
     await waitFor(() => {
       expect(screen.queryByTestId("ui-fence")).toBeNull();
+      expect(
+        view.container.querySelector("[data-code-fence-parking]"),
+      ).toBeNull();
     });
-    expect(
-      view.container.querySelector("[data-code-fence-parking]"),
-    ).toBeNull();
   });
 
   it("keeps claimed fences through the sanitized HTML pipeline", () => {
@@ -360,7 +359,7 @@ describe("code fence renderers in assistant messages", () => {
     expect(view.container.textContent).toContain("{ bad");
     expect(view.container.textContent).not.toContain("crashed");
     expect(
-      view.container.querySelectorAll('button[aria-label="Wrap long lines"]'),
+      view.container.querySelectorAll('button[aria-label="Wrap lines"]'),
     ).toHaveLength(1);
 
     view.rerender(
@@ -375,7 +374,7 @@ describe("code fence renderers in assistant messages", () => {
       { code: "{ fixed }", status: "closed", index: "1" },
     ]);
     expect(
-      view.container.querySelectorAll('button[aria-label="Wrap long lines"]'),
+      view.container.querySelectorAll('button[aria-label="Wrap lines"]'),
     ).toHaveLength(0);
   });
 
@@ -476,7 +475,7 @@ describe("MarkdownPreview inside a code fence host", () => {
     const wrapper = screen.getByTestId("delegating-fence");
     expect(wrapper.textContent).toContain("{ delegated }");
     expect(
-      wrapper.querySelector('button[aria-label="Wrap long lines"]'),
+      wrapper.querySelector('button[aria-label="Wrap lines"]'),
     ).not.toBeNull();
   });
 

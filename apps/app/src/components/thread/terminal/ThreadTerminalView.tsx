@@ -1,8 +1,10 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type TouchEvent as ReactTouchEvent,
 } from "react";
@@ -14,6 +16,7 @@ import type {
   Terminal as XTermTerminal,
 } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import type { SearchAddon } from "@xterm/addon-search";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -29,6 +32,7 @@ import type {
   TerminalSession,
 } from "@bb/server-contract";
 import { useAppThemeEpoch } from "@/hooks/useAppTheme";
+import { useSystemConfig } from "@/hooks/queries/system-queries";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import type { MarkdownPreviewLinkHandler } from "@/components/ui/markdown-link";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
@@ -44,16 +48,34 @@ import {
 } from "@/components/thread/timeline/SelectableMessageProse.js";
 import { TimelineSelectionMenu } from "@/components/thread/timeline/TimelineSelectionMenu.js";
 import { buildTerminalWebSocketUrl } from "./terminal-websocket-url";
+import {
+  importTerminalModules,
+  importTerminalWebglAddon,
+} from "./terminal-modules";
 import { TerminalWebSocketTransport } from "@bb/client-core";
+import {
+  useAppCommandHandler,
+  useAppCommandRunner,
+} from "@/components/commands/AppCommandProvider";
+import { TerminalFindBar } from "./TerminalFindBar";
+import {
+  createTerminalFileLinkProvider,
+  parseTerminalReportedCwd,
+} from "./terminal-file-links";
 import { TerminalLinkOpenDialog } from "./TerminalLinkOpenDialog";
 import { TerminalMobileControls } from "./TerminalMobileControls";
-import { attachTerminalCopyShortcut } from "./terminal-copy-shortcut";
+import {
+  createTerminalClipboardKeyHandler,
+  createTerminalSelectionClipboardHandler,
+  pasteTerminalClipboard,
+} from "./terminal-clipboard";
 import {
   applyTerminalControl,
   encodeTerminalArrow,
 } from "./terminal-mobile-input";
 import {
   createTerminalOsc8LinkHandler,
+  isTerminalLinkActivation,
   requestTerminalLinkOpen,
   type TerminalLinkTarget,
 } from "./terminal-links";
@@ -274,6 +296,7 @@ export function buildTerminalThemeFromCssColors(
     cursor: get("--foreground"),
     cursorAccent: get("--sidebar"),
     selectionBackground: get("--muted"),
+    selectionInactiveBackground: get("--muted"),
     black: get("--ansi-0"),
     red: get("--ansi-1"),
     green: get("--ansi-2"),
@@ -668,8 +691,6 @@ export function ThreadTerminalView({
   const [terminalReady, setTerminalReady] = useState(false);
   const [activeSelection, setActiveSelection] =
     useState<MessageProseSelection | null>(null);
-  const [hoveredTerminalLink, setHoveredTerminalLink] =
-    useState<TerminalLinkTarget | null>(null);
   const [pendingTerminalLink, setPendingTerminalLink] =
     useState<TerminalLinkTarget | null>(null);
   const [connectionNotice, setConnectionNotice] =
@@ -679,6 +700,10 @@ export function ThreadTerminalView({
       link: null,
       selectionText: "",
     });
+  const [searchAddon, setSearchAddon] = useState<SearchAddon | null>(null);
+  const [findFocusRequest, setFindFocusRequest] = useState<number | null>(null);
+  const findOpenRef = useRef(false);
+  const viewRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<XTermTerminal | null>(null);
   const hoveredTerminalLinkRef = useRef<TerminalLinkTarget | null>(null);
@@ -701,9 +726,18 @@ export function ThreadTerminalView({
   const sessionRef = useRef(session);
   const lastStatusNoticeRef = useRef<TerminalSessionStatusNotice | null>(null);
   const scheduleFitRef = useRef<TerminalFitScheduler | null>(null);
+  const systemConfig = useSystemConfig();
+  const copyOnSelectRef = useRef(false);
+  copyOnSelectRef.current =
+    systemConfig.data?.generalSettings.terminalCopyOnSelect === true;
   const preferredTheme = usePreferredTheme();
   const appThemeEpoch = useAppThemeEpoch();
   const appNavigation = useAppNavigationHost();
+  const appNavigationRef = useRef(appNavigation);
+  useEffect(() => {
+    appNavigationRef.current = appNavigation;
+  }, [appNavigation]);
+  const commandRunner = useAppCommandRunner();
   const handleOpenLinkByPreference = useCallback<MarkdownPreviewLinkHandler>(
     ({ href }) => appNavigation.openUrl({ url: href }),
     [appNavigation],
@@ -720,6 +754,17 @@ export function ThreadTerminalView({
   onSessionChangeRef.current = onSessionChange;
   onTitleChangeRef.current = onTitleChange;
 
+  const copySelectedText = useMemo(
+    () =>
+      createTerminalSelectionClipboardHandler((text) => {
+        void copyToClipboardWithToast(text, {
+          successMessage: "Selection copied",
+          errorMessage: "Failed to copy selection",
+        });
+      }),
+    [],
+  );
+
   const reportTerminalSelection = useCallback(
     (anchor: SelectionAnchor | null) => {
       const terminal = terminalRef.current;
@@ -728,15 +773,22 @@ export function ThreadTerminalView({
         setActiveSelection(null);
         return;
       }
+      if (pointerIsDownRef.current || findOpenRef.current) {
+        return;
+      }
+      const text = terminal.getSelection();
+      if (copyOnSelectRef.current) {
+        copySelectedText(text);
+      }
       setActiveSelection(
         buildTerminalSelection({
           anchor,
           containerElement: container,
-          text: terminal.getSelection(),
+          text,
         }),
       );
     },
-    [],
+    [copySelectedText],
   );
 
   const clearTerminalSelection = useCallback(() => {
@@ -744,10 +796,47 @@ export function ThreadTerminalView({
     setActiveSelection(null);
   }, []);
 
+  const isTerminalCommandAvailable = ({
+    target,
+  }: {
+    target: EventTarget | null;
+  }) =>
+    terminalRef.current !== null &&
+    (target === null ||
+      (target instanceof Node && viewRef.current?.contains(target) === true));
+  useAppCommandHandler(
+    "terminal.find",
+    () => {
+      findOpenRef.current = true;
+      setActiveSelection(null);
+      setFindFocusRequest((request) => (request ?? 0) + 1);
+      return true;
+    },
+    0,
+    isPanelOpen,
+    isTerminalCommandAvailable,
+  );
+  const closeFind = () => {
+    findOpenRef.current = false;
+    searchAddon?.clearDecorations();
+    clearTerminalSelection();
+    setFindFocusRequest(null);
+    terminalRef.current?.focus();
+  };
+  const handleTerminalCommandKeyDown = (event: ReactKeyboardEvent) => {
+    const command = commandRunner.getShortcutCommand(event.nativeEvent, [
+      "terminal.find",
+    ]);
+    if (command === null || !commandRunner.dispatch(command, event.target)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   const updateHoveredTerminalLink = useCallback(
     (target: TerminalLinkTarget | null) => {
       hoveredTerminalLinkRef.current = target;
-      setHoveredTerminalLink(target);
     },
     [],
   );
@@ -797,6 +886,24 @@ export function ThreadTerminalView({
     [],
   );
 
+  const pasteFromClipboard = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (terminal === null || sessionStatusRef.current !== "running") {
+      return;
+    }
+    void pasteTerminalClipboard({
+      terminal,
+      readText: () => navigator.clipboard.readText(),
+      isActive: () =>
+        terminalRef.current === terminal &&
+        sessionStatusRef.current === "running",
+    }).catch(() => {
+      appToast.error(
+        "Unable to read clipboard. Use your keyboard’s Paste action.",
+      );
+    });
+  }, []);
+
   const handleSelectionAddToChat = useCallback(
     (text: string) => {
       onSelectionAddToChat?.(text);
@@ -807,6 +914,12 @@ export function ThreadTerminalView({
 
   const handleTerminalPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        if (event.button === 1) {
+          terminalRef.current?.focus();
+        }
+        return;
+      }
       pointerIsDownRef.current = true;
       pointerStartPointRef.current = anchorPointFromMouseEvent(event);
     },
@@ -814,7 +927,10 @@ export function ThreadTerminalView({
   );
 
   const handleTerminalPointerRelease = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
+    (event: Pick<PointerEvent, "button" | "clientX" | "clientY">) => {
+      if (event.button !== 0) {
+        return;
+      }
       const anchor = selectionAnchorFromPointerRelease(
         pointerStartPointRef.current,
         { clientX: event.clientX, clientY: event.clientY },
@@ -836,6 +952,25 @@ export function ThreadTerminalView({
       reportTerminalSelection(lastPointerReleaseAnchorRef.current);
     });
   }, [reportTerminalSelection]);
+
+  useEffect(() => {
+    const release = (event: PointerEvent) => {
+      if (pointerIsDownRef.current) {
+        handleTerminalPointerRelease(event);
+      }
+    };
+    const cancel = () => {
+      if (pointerIsDownRef.current) {
+        handleTerminalPointerCancel();
+      }
+    };
+    document.addEventListener("pointerup", release);
+    document.addEventListener("pointercancel", cancel);
+    return () => {
+      document.removeEventListener("pointerup", release);
+      document.removeEventListener("pointercancel", cancel);
+    };
+  }, [handleTerminalPointerRelease, handleTerminalPointerCancel]);
 
   const handleTerminalTouchStart = useCallback(
     (event: ReactTouchEvent<HTMLDivElement>) => {
@@ -877,12 +1012,15 @@ export function ThreadTerminalView({
   }, []);
 
   useEffect(() => {
+    copySelectedText("");
     touchFocusGestureRef.current = null;
     setActiveSelection(null);
     updateHoveredTerminalLink(null);
     setPendingTerminalLink(null);
+    findOpenRef.current = false;
+    setFindFocusRequest(null);
     setContextMenuState({ link: null, selectionText: "" });
-  }, [session.id, updateHoveredTerminalLink]);
+  }, [copySelectedText, session.id, updateHoveredTerminalLink]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -913,20 +1051,16 @@ export function ThreadTerminalView({
     async function mountTerminal(
       containerElement: HTMLDivElement,
     ): Promise<void> {
-      const requiredModulesPromise = Promise.all([
-        import("@xterm/xterm"),
-        import("@xterm/addon-fit"),
-        import("@xterm/addon-web-links"),
-        import("@xterm/addon-unicode11"),
-      ]);
+      const requiredModulesPromise = importTerminalModules();
       const webglAddonModulePromise = loadOptionalTerminalWebglAddon(
-        () => import("@xterm/addon-webgl"),
+        importTerminalWebglAddon,
       );
       const [
         { Terminal },
         { FitAddon: LoadedFitAddon },
         { WebLinksAddon },
         { Unicode11Addon },
+        { SearchAddon: LoadedSearchAddon },
       ] = await requiredModulesPromise;
       const webglAddonModule = await webglAddonModulePromise;
       if (disposed) {
@@ -953,12 +1087,31 @@ export function ThreadTerminalView({
         theme: buildTerminalTheme(),
       });
       terminalRef.current = terminal;
-      attachTerminalCopyShortcut({
-        copy: (text) => {
-          void copyToClipboardWithToast(text, { successMessage: null });
-        },
-        terminal,
+      terminal.attachCustomKeyEventHandler(
+        createTerminalClipboardKeyHandler({
+          terminal,
+          copy: (text) => copyTerminalContextValue(text, "Selection copied"),
+          paste: pasteFromClipboard,
+        }),
+      );
+      const loadedSearchAddon = new LoadedSearchAddon();
+      terminal.loadAddon(loadedSearchAddon);
+      setSearchAddon(loadedSearchAddon);
+      let reportedCwd: string | null = null;
+      terminal.parser.registerOscHandler(7, (data) => {
+        reportedCwd = parseTerminalReportedCwd(data) ?? reportedCwd;
+        return false;
       });
+      terminal.registerLinkProvider(
+        createTerminalFileLinkProvider({
+          terminal,
+          getCwd: () => reportedCwd ?? sessionRef.current.initialCwd,
+          hostId: sessionRef.current.hostId,
+          openFile: (intent) => {
+            appNavigationRef.current.openFilePreview(intent);
+          },
+        }),
+      );
       fitAddon = new LoadedFitAddon();
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(new Unicode11Addon());
@@ -966,7 +1119,7 @@ export function ThreadTerminalView({
       terminal.loadAddon(
         new WebLinksAddon(
           (event, uri) => {
-            if (event.button !== 0) {
+            if (!isTerminalLinkActivation(event)) {
               return;
             }
             requestOpenTerminalLink({ source: "detected-url", uri });
@@ -1202,9 +1355,12 @@ export function ThreadTerminalView({
       transport?.dispose();
       terminal?.dispose();
       terminalRef.current = null;
+      setSearchAddon(null);
       scheduleFitRef.current = null;
     };
   }, [
+    copyTerminalContextValue,
+    pasteFromClipboard,
     reportTerminalSelection,
     requestOpenTerminalLink,
     session.id,
@@ -1257,11 +1413,19 @@ export function ThreadTerminalView({
           : null;
   const contextMenuLink = contextMenuState.link;
   const contextMenuSelectionText = contextMenuState.selectionText;
-  const hasTerminalContextMenuTarget =
-    hoveredTerminalLink !== null || activeSelection !== null;
-
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      ref={viewRef}
+      className="flex h-full min-h-0 flex-col"
+      onKeyDownCapture={handleTerminalCommandKeyDown}
+    >
+      {findFocusRequest !== null && searchAddon !== null ? (
+        <TerminalFindBar
+          addon={searchAddon}
+          focusRequest={findFocusRequest}
+          onClose={closeFind}
+        />
+      ) : null}
       <ContextMenu
         onOpenChange={(open) => {
           if (!open) {
@@ -1269,7 +1433,7 @@ export function ThreadTerminalView({
           }
         }}
       >
-        <ContextMenuTrigger asChild disabled={!hasTerminalContextMenuTarget}>
+        <ContextMenuTrigger asChild>
           <div
             className="relative min-h-0 w-full flex-1 overflow-hidden bg-sidebar p-2"
             onContextMenuCapture={captureTerminalContextMenu}
@@ -1295,7 +1459,13 @@ export function ThreadTerminalView({
             ) : null}
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="min-w-36">
+        <ContextMenuContent
+          className="min-w-36"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            terminalRef.current?.focus();
+          }}
+        >
           {contextMenuLink !== null ? (
             <>
               <ContextMenuItem
@@ -1327,6 +1497,15 @@ export function ThreadTerminalView({
               Copy
             </ContextMenuItem>
           ) : null}
+          {contextMenuLink !== null || contextMenuSelectionText.length > 0 ? (
+            <ContextMenuSeparator />
+          ) : null}
+          <ContextMenuItem
+            disabled={session.status !== "running"}
+            onSelect={pasteFromClipboard}
+          >
+            Paste
+          </ContextMenuItem>
         </ContextMenuContent>
         <TimelineSelectionMenu
           selection={activeSelection}
@@ -1377,26 +1556,8 @@ export function ThreadTerminalView({
             else terminal.focus();
           }}
           onPaste={() => {
-            const terminal = terminalRef.current;
-            if (!terminal) return;
-            if (!navigator.clipboard?.readText) {
-              appToast.error(
-                "Clipboard unavailable. Use your keyboard’s Paste action.",
-              );
-              return;
-            }
-            void navigator.clipboard
-              .readText()
-              .then((text) => {
-                if (terminalRef.current !== terminal) return;
-                changeControlActive(false);
-                terminal.paste(text);
-              })
-              .catch(() => {
-                appToast.error(
-                  "Clipboard unavailable. Use your keyboard’s Paste action.",
-                );
-              });
+            changeControlActive(false);
+            pasteFromClipboard();
           }}
         />
       ) : null}

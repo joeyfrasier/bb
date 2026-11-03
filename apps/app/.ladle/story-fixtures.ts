@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { reconcileReasoningLevel } from "@bb/domain";
-import type {
-  Host,
-  ProjectSource,
-  ProviderInfo,
-  ReasoningLevel,
-  Thread,
-  WorkspaceStatus,
+import {
+  reconcileReasoningLevel,
+  type Host,
+  type ProjectSource,
+  type PromptMentionCommandTrigger,
+  type ProviderInfo,
+  type ReasoningLevel,
+  type Thread,
 } from "@bb/domain";
 import type {
   ProviderCliKey,
@@ -16,7 +16,6 @@ import type {
   ProjectResponse,
   SystemEnvironmentProvider,
 } from "@bb/server-contract";
-import { EMPTY_ORDERED_MENTION_SUGGESTIONS } from "@bb/client-core";
 import {
   makeEnvironment as makeEnvironmentFixture,
   makeHost as makeHostFixture,
@@ -31,13 +30,11 @@ import type { ModelPickerOption } from "../src/components/pickers/model-picker-o
 import type { ProjectSelectorOption } from "../src/components/pickers/ProjectSelector";
 import type { ReuseThreadOption } from "../src/components/pickers/ReuseEnvironmentPicker";
 import type { ExecutionControlsProps } from "../src/components/promptbox/ExecutionControls";
-import {
-  INERT_TYPEAHEAD_COMMAND_CONFIG,
-  type AttachmentsConfig,
-  type TypeaheadCommandConfig,
-  type TypeaheadConfig,
-  type TypeaheadMentionConfig,
-} from "../src/components/promptbox/PromptBoxInternal";
+import type {
+  AttachmentsConfig,
+  TypeaheadConfig,
+} from "../src/components/promptbox/ComposerBox";
+import type { WorkspaceStatus } from "bb-plugin-bb--git/contract";
 
 const noop = () => {};
 
@@ -68,23 +65,21 @@ export const BRANCH_NAMES = {
   feature: "feat/sidebar-rail",
 } as const;
 
-export function makeTypeaheadConfig(
-  mentionOverrides: Partial<TypeaheadMentionConfig> = {},
-  commandOverrides: Partial<TypeaheadCommandConfig> = {},
-): TypeaheadConfig {
-  const mention: TypeaheadMentionConfig = {
-    results: EMPTY_ORDERED_MENTION_SUGGESTIONS,
-    isLoading: false,
-    isRefreshing: false,
-    isError: false,
-    onQueryChange: noop,
-    ...mentionOverrides,
-  };
+export function makeTypeaheadConfig({
+  commandTriggers = [],
+}: {
+  commandTriggers?: readonly PromptMentionCommandTrigger[];
+} = {}): TypeaheadConfig {
   return {
-    mention,
+    mention: { source: { projectId: undefined, environmentId: null } },
     command: {
-      ...INERT_TYPEAHEAD_COMMAND_CONFIG,
-      ...commandOverrides,
+      source: {
+        projectId: undefined,
+        providerId: undefined,
+        commandScope: "thread",
+        skillsTriggers: commandTriggers,
+        environmentId: null,
+      },
     },
   };
 }
@@ -632,6 +627,7 @@ export function makeWorkspaceStatus(
       baseRef: null,
       aheadCount: 0,
       behindCount: 0,
+      squashMergeCheckComplete: true,
       hasCommittedUnmergedChanges: false,
       commits: [],
       insertions: 0,

@@ -1,3 +1,4 @@
+import { experimental_hostToolchain as hostToolchain } from "@get-bb/plugin-sdk/process";
 import {
   type InstructionMode,
   type ReasoningLevel,
@@ -5,7 +6,7 @@ import {
   type RuntimePermissionScope,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import type { Options, Settings } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import type {
@@ -28,6 +29,7 @@ export interface BuildSessionOptionsArgs {
   workflowsEnabled: boolean;
   chromeEnabled: boolean;
   disable1MContext: boolean;
+  artifactsEnabled: boolean;
   sandboxEnabled: boolean;
   memoryEnabled?: boolean;
 }
@@ -44,11 +46,6 @@ export interface PermissionEscalationWorkContext {
   agentId?: string;
   promptId?: string;
   toolUseId?: string;
-}
-
-interface ResolveExecutableOnPathArgs {
-  executableName: string;
-  pathEnv: string | undefined;
 }
 
 interface ResolveClaudeCodeExecutableArgs {
@@ -88,6 +85,18 @@ function buildFlagSettings(params: BuildSessionOptionsArgs): Settings {
     enableWorkflows: params.workflowsEnabled,
     ultracode: params.reasoningLevel === "ultracode",
     fastMode: params.serviceTier === "fast",
+  };
+}
+
+export function buildClaudeFeatureEnv(
+  params: Pick<
+    BuildSessionOptionsArgs,
+    "artifactsEnabled" | "disable1MContext"
+  >,
+): Record<string, string> {
+  return {
+    CLAUDE_CODE_DISABLE_1M_CONTEXT: params.disable1MContext ? "1" : "0",
+    ...(params.artifactsEnabled ? { CLAUDE_CODE_ARTIFACT: "1" } : {}),
   };
 }
 
@@ -163,26 +172,6 @@ function isExecutableFile(candidatePath: string): boolean {
   }
 }
 
-function resolveExecutableOnPath(
-  args: ResolveExecutableOnPathArgs,
-): string | null {
-  if (!args.pathEnv) {
-    return null;
-  }
-
-  for (const searchDir of args.pathEnv.split(delimiter)) {
-    if (!searchDir) {
-      continue;
-    }
-    const candidate = join(searchDir, args.executableName);
-    if (isExecutableFile(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
 function wellKnownClaudeExecutablePaths(env: NodeJS.ProcessEnv): string[] {
   if (process.getuid?.() === 0) {
     return [];
@@ -221,22 +210,14 @@ export function resolveClaudeCodeExecutable(
     }
   }
 
-  const executableOnPath = resolveExecutableOnPath({
-    executableName:
+  return (
+    hostToolchain.resolve(
       process.platform === "win32" ? CLAUDE_WINDOWS_EXECUTABLE_NAME : "claude",
-    pathEnv: args.env.PATH ?? args.env.Path,
-  });
-  if (executableOnPath) {
-    return executableOnPath;
-  }
-
-  for (const candidate of wellKnownClaudeExecutablePaths(args.env)) {
-    if (isExecutableFile(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
+      { env: args.env },
+    ) ??
+    wellKnownClaudeExecutablePaths(args.env).find(isExecutableFile) ??
+    null
+  );
 }
 
 export function buildSessionOptions(
@@ -272,7 +253,7 @@ export function buildSessionOptions(
     model,
     env: {
       ...env,
-      CLAUDE_CODE_DISABLE_1M_CONTEXT: params.disable1MContext ? "1" : "0",
+      ...buildClaudeFeatureEnv(params),
     },
     permissionMode: params.permissionMode,
     allowBypassPermissions: params.permissionScope === "full",

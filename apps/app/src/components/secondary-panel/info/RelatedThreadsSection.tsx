@@ -9,26 +9,24 @@ import { ThreadTitle } from "@/components/thread/ThreadTitleMentions";
 import { useChildThreads, useThreads } from "@/hooks/queries/thread-queries";
 import { getThreadRoutePath } from "@/lib/route-paths";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
-import { InfoList, InfoListRow, InfoRowTime, InfoSection } from "./info-list";
-import { useInfoSectionCollapse } from "./useInfoSectionCollapse";
+import { InfoListRow, InfoRowTime } from "@bb/shared-ui/info-list-row";
+import { Link } from "react-router-dom";
+import { InfoList, InfoSection } from "./info-list";
 
 interface RelatedThreadsSectionProps {
-  sectionId: string;
   label: string;
   threads: readonly ThreadListEntry[];
   idleIcon?: IconName;
 }
 
 export function RelatedThreadsSection({
-  sectionId,
   label,
   threads,
   idleIcon,
 }: RelatedThreadsSectionProps) {
-  const collapse = useInfoSectionCollapse(sectionId);
   if (threads.length === 0) return null;
   return (
-    <InfoSection label={label} count={threads.length} collapse={collapse}>
+    <InfoSection label={label} count={threads.length}>
       <InfoList
         items={threads}
         getKey={(relatedThread) => relatedThread.id}
@@ -51,11 +49,19 @@ export function RelatedThreadsSection({
               name={<ThreadTitle title={title} />}
               title={title}
               target={{
-                kind: "link",
-                to: getThreadRoutePath({
-                  projectId: relatedThread.projectId,
-                  threadId: relatedThread.id,
-                }),
+                kind: "custom",
+                render: (primary) => (
+                  <Link
+                    to={getThreadRoutePath({
+                      projectId: relatedThread.projectId,
+                      threadId: relatedThread.id,
+                    })}
+                    title={primary.title}
+                    className={primary.className}
+                  >
+                    {primary.children}
+                  </Link>
+                ),
               }}
               trailing={<InfoRowTime timestamp={relatedThread.updatedAt} />}
             />
@@ -73,7 +79,6 @@ export function ChildThreadsSection({ thread }: { thread: Thread }) {
   });
   return (
     <RelatedThreadsSection
-      sectionId="childThreads"
       label="Child threads"
       threads={(childThreadsQuery.data ?? []).filter(
         (childThread) => childThread.originKind === null,
@@ -91,10 +96,6 @@ export function ForksSection({ thread }: { thread: Thread }) {
     archived: false,
   });
   return (
-    <RelatedThreadsSection
-      sectionId="forks"
-      label="Forks"
-      threads={forksQuery.data ?? []}
-    />
+    <RelatedThreadsSection label="Forks" threads={forksQuery.data ?? []} />
   );
 }

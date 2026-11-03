@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 import type {
   PluginMessageDirectiveProps,
-  PluginThreadPanelProps,
+  ExperimentalThreadActionTabProps,
 } from "@get-bb/plugin-sdk";
-import { useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
+import {
+  experimental_useAppPanel,
+  experimental_useRpcQuery,
+  useBbNavigate,
+} from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { Task } from "../../shared/contract.js";
-import { useTasksRpc } from "../../shell/data.js";
-import { TasksRefreshProvider } from "../../shell/refresh.js";
+import { tasksRpcContract, type Task } from "../../shared/contract.js";
 import { PANEL_PATH, tasksRouteToSubPath } from "../../shell/routes.js";
 import { DetailView } from "../detail/index.js";
 import { PRIORITY_LABELS, STATUS_LABELS } from "../list/lib.js";
@@ -27,51 +29,25 @@ function useTaskEmbed(taskKey: string): {
   state: TaskEmbedState;
   retry: () => void;
 } {
-  const rpc = useTasksRpc();
-  const [state, setState] = useState<TaskEmbedState>({ kind: "loading" });
-  const seqRef = useRef(0);
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
-  const refresh = useCallback(() => {
-    if (taskKey === "") return;
-    const seq = ++seqRef.current;
-    rpc.call("getTaskByKey", { taskKey }).then(
-      ({ task }) => {
-        if (seq !== seqRef.current) return;
-        setState(task ? { kind: "found", task } : { kind: "not_found" });
-      },
-      () => {
-        if (seq !== seqRef.current) return;
-        setState({ kind: "error" });
-      },
-    );
-  }, [rpc, taskKey]);
-
-  useEffect(() => {
-    setState({ kind: "loading" });
-    refresh();
-  }, [refresh]);
-
-  const onEvent = useCallback(
-    (matches: (task: Task) => boolean) => {
-      const current = stateRef.current;
-      if (current.kind !== "found" || matches(current.task)) refresh();
-    },
-    [refresh],
-  );
-  useRealtime("tasks:changed", (payload) => {
-    const taskId = isRecord(payload) ? payload.taskId : undefined;
-    onEvent((task) => typeof taskId !== "string" || taskId === task.id);
+  const query = experimental_useRpcQuery({
+    contract: tasksRpcContract,
+    method: "getTaskByKey",
+    input: { taskKey },
+    enabled: taskKey !== "",
   });
-  useRealtime("projects:changed", (payload) => {
-    const projectId = isRecord(payload) ? payload.projectId : undefined;
-    onEvent(
-      (task) => typeof projectId !== "string" || projectId === task.projectId,
-    );
-  });
-
-  return { state, retry: refresh };
+  const { refetch } = query;
+  const retry = useCallback(() => {
+    void refetch();
+  }, [refetch]);
+  const state: TaskEmbedState =
+    query.error !== null
+      ? { kind: "error" }
+      : query.data === undefined
+        ? { kind: "loading" }
+        : query.data.task
+          ? { kind: "found", task: query.data.task }
+          : { kind: "not_found" };
+  return { state, retry };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -92,7 +68,7 @@ function OpenInTasksButton({
   const navigate = useBbNavigate();
   return (
     <Button
-      className="size-8 shrink-0"
+      className="relative z-10 size-8 shrink-0"
       size="icon"
       variant="ghost"
       aria-label={label}
@@ -110,9 +86,11 @@ function OpenInTasksButton({
 
 function CardShell({
   dashed = false,
+  interactive = false,
   children,
 }: {
   dashed?: boolean;
+  interactive?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -120,7 +98,7 @@ function CardShell({
       className={
         dashed
           ? "my-3 flex h-11 items-center gap-1 rounded-lg border border-dashed border-border bg-surface-recessed-solid px-2"
-          : "my-3 flex h-11 items-center gap-1 rounded-lg border border-border bg-card px-2 shadow-sm transition-colors hover:bg-state-hover"
+          : `relative my-3 flex h-11 items-center gap-1 rounded-lg border border-border bg-card px-2 shadow-sm${interactive ? " select-none transition-colors hover:bg-state-hover" : ""}`
       }
     >
       {children}
@@ -141,6 +119,7 @@ function embedAriaLabel(task: Task): string {
 
 export function TaskDirectiveCard({ attributes }: PluginMessageDirectiveProps) {
   const navigate = useBbNavigate();
+  const panel = experimental_useAppPanel();
   const taskKey = attributes.key?.trim() ?? "";
   const fallbackTitle = attributes.title?.trim() || null;
   const validKey = TASK_KEY_PATTERN.test(taskKey);
@@ -221,8 +200,8 @@ export function TaskDirectiveCard({ attributes }: PluginMessageDirectiveProps) {
 
   const { task } = state;
   const openInSidePanel = () => {
-    const opened = navigate.openThreadPanel({
-      actionId: "task",
+    const opened = panel.openTab({
+      tab: { id: "task", context: { kind: "thread" }, availability: "action" },
       title: task.key,
       params: { taskKey: task.key },
     });
@@ -234,10 +213,10 @@ export function TaskDirectiveCard({ attributes }: PluginMessageDirectiveProps) {
   };
 
   return (
-    <CardShell>
+    <CardShell interactive>
       <button
         type="button"
-        className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left after:absolute after:inset-0 after:rounded-lg focus-visible:outline-none focus-visible:after:ring-1 focus-visible:after:ring-ring"
         aria-label={embedAriaLabel(task)}
         onClick={openInSidePanel}
       >
@@ -270,7 +249,7 @@ export function TaskDirectiveCard({ attributes }: PluginMessageDirectiveProps) {
   );
 }
 
-function TaskEmbedPanelContent({ params }: PluginThreadPanelProps) {
+function TaskEmbedPanelContent({ params }: ExperimentalThreadActionTabProps) {
   const taskKey =
     isRecord(params) && typeof params.taskKey === "string"
       ? params.taskKey
@@ -300,10 +279,6 @@ function TaskEmbedPanelContent({ params }: PluginThreadPanelProps) {
   );
 }
 
-export function TaskEmbedPanel(props: PluginThreadPanelProps) {
-  return (
-    <TasksRefreshProvider>
-      <TaskEmbedPanelContent {...props} />
-    </TasksRefreshProvider>
-  );
+export function TaskEmbedPanel(props: ExperimentalThreadActionTabProps) {
+  return <TaskEmbedPanelContent {...props} />;
 }

@@ -1,3 +1,5 @@
+import { reportedProviderId } from "../services/system/provider-telemetry.js";
+import { rememberPluginRecommendation } from "../services/plugins/plugin-use-telemetry.js";
 import { createMobileAppReleaseService } from "../services/install/mobile-app-releases.js";
 import {
   setMachineEnvironmentVariable,
@@ -307,10 +309,15 @@ export function registerSystemRoutes(
         : undefined;
     const updatedSettings = appSettingsSchema.parse({
       ...settings,
+      idleProviderSessionTimeoutMinutes:
+        settings.idleProviderSessionTimeoutMinutes === undefined
+          ? current.idleProviderSessionTimeoutMinutes
+          : settings.idleProviderSessionTimeoutMinutes,
       allowFastServiceTier:
         settings.allowFastServiceTier ?? current.allowFastServiceTier,
       telemetryEnabled: settings.telemetryEnabled ?? current.telemetryEnabled,
-      showGitChanges: settings.showGitChanges ?? current.showGitChanges,
+      terminalCopyOnSelect:
+        settings.terminalCopyOnSelect ?? current.terminalCopyOnSelect,
       keepHistoryAfterContextClear:
         settings.keepHistoryAfterContextClear ??
         current.keepHistoryAfterContextClear,
@@ -340,7 +347,29 @@ export function registerSystemRoutes(
   });
 
   post(routes.recordTelemetryEvent, (context, payload) => {
-    deps.telemetry.capture(payload);
+    if (
+      payload.name === "recommendation" &&
+      payload.properties.action === "selected"
+    ) {
+      rememberPluginRecommendation(
+        deps,
+        payload.properties.resource_id,
+        payload.properties.recommendation_id,
+      );
+    }
+    deps.telemetry.capture(
+      payload.name === "onboarding_operation" &&
+        payload.properties.step === "agent" &&
+        payload.properties.resource_id !== undefined
+        ? {
+            ...payload,
+            properties: {
+              ...payload.properties,
+              resource_id: reportedProviderId(payload.properties.resource_id),
+            },
+          }
+        : payload,
+    );
     return context.json({ ok: true });
   });
 

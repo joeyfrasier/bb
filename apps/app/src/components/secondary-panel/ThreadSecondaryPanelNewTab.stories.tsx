@@ -14,8 +14,10 @@ import {
   environmentPathsQueryKey,
   threadStoragePathsQueryKey,
 } from "@/hooks/queries/query-keys";
-import { ThreadSecondaryPanel } from "./ThreadSecondaryPanel";
-import type { SecondaryPanelRenderableTab } from "./ThreadSecondaryPanel";
+import {
+  ThreadSecondaryPanel,
+  type SecondaryPanelRenderableTab,
+} from "./ThreadSecondaryPanel";
 import { NewTabPage } from "./NewTabPage";
 import type { FileSearchSelection } from "./useThreadFileTabs";
 import { Icon } from "@bb/shared-ui/icon";
@@ -486,7 +488,6 @@ function NewTabPanelStory({
           startTerminalTrailing={
             terminalHosts === undefined ? undefined : (
               <TerminalHostSelector
-                disabled={false}
                 hosts={terminalHosts}
                 isLoading={false}
                 onChange={setPreferredTerminalHostId}
@@ -560,9 +561,6 @@ function NewTabPanelStory({
     <PanelStage presentation={presentation}>
       <ThreadSecondaryPanel
         activeTab={activeTab}
-        canUseGitUi
-        requestedMergeBaseBranch="main"
-        environmentId={ENVIRONMENT_ID}
         tabs={[panelTab]}
         fixedTabs={[]}
         isOpen

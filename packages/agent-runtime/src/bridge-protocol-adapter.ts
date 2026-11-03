@@ -26,7 +26,6 @@ import {
   ASSEMBLER_GRAMMAR_VERSIONS,
   createDeltaAssembler,
 } from "@bb/provider-bridge-protocol/assembler";
-import { z } from "zod";
 import type {
   AdapterCommand,
   ProviderExecutionContext,
@@ -102,10 +101,6 @@ interface BridgeProtocolAdapterOptions {
   process: { command: string; args: string[]; env?: Record<string, string> };
   staticProviderOptions?: Record<string, unknown>;
 }
-
-const providerNativeIdsParamsSchema = z
-  .object({ providerNativeIds: z.boolean().optional() })
-  .passthrough();
 
 function toBridgeWireOptions(
   options: ProviderExecutionContext,
@@ -218,6 +213,21 @@ export function createBridgeProtocolAdapter(
           return {
             kind: "request",
             method: BRIDGE_REQUEST_METHODS.modelList,
+            params: {
+              ...cwdAndStaticProviderOptions(command.cwd),
+              envVars: command.envVars,
+              ...(command.selectedModel === undefined
+                ? {}
+                : { selectedModel: command.selectedModel }),
+            },
+          };
+        case "commands/list":
+          if (!handshake.commands.list) {
+            return { kind: "noop", reason: "commands.list not advertised" };
+          }
+          return {
+            kind: "request",
+            method: BRIDGE_REQUEST_METHODS.commandList,
             params: cwdAndStaticProviderOptions(command.cwd),
           };
         case "provider/health":
@@ -597,15 +607,7 @@ export function createBridgeProtocolAdapter(
         request.method,
         request.params,
       );
-      if (decoded === null) {
-        return decoded;
-      }
-      const marker = providerNativeIdsParamsSchema.safeParse(request.params);
-      if (
-        marker.success !== true ||
-        marker.data.providerNativeIds !== true ||
-        decoded.threadId === undefined
-      ) {
+      if (decoded === null || decoded.threadId === undefined) {
         return decoded;
       }
       return {
@@ -634,10 +636,10 @@ export function createBridgeProtocolAdapter(
       if (!parsed.success) {
         return null;
       }
-      const { providerNativeIds, threadId, ...decoded } = parsed.data;
+      const { threadId, ...decoded } = parsed.data;
       let turnId = decoded.turnId;
       let payload = decoded.payload;
-      if (providerNativeIds === true && threadId !== undefined) {
+      if (threadId !== undefined) {
         turnId =
           turnId === null
             ? null

@@ -2,13 +2,17 @@ import type {
   CommandDispatchOptions,
   CommandOf,
 } from "../command-dispatch-support.js";
+import { ExpectedCommandDispatchError } from "../command-dispatch-support.js";
 import {
   LifecycleScriptTerminationUnverifiedError,
   runSetupScript,
   runTeardownScript,
 } from "../environment-lifecycle-script.js";
 
+import { inspectWorkspaceProcesses } from "../workspace-processes.js";
+
 interface HookOutcome {
+  active: boolean;
   terminationUnverified: boolean;
 }
 
@@ -42,7 +46,10 @@ export async function runEnvironmentHook(
   const active = controllers(options);
   const existing = active.get(command.operationId);
   if (existing === "cancelled")
-    throw new Error("Environment hook cancelled before dispatch");
+    throw new ExpectedCommandDispatchError(
+      "command_failed",
+      "Environment hook cancelled before dispatch",
+    );
   if (existing !== undefined) {
     if (existing.path !== command.path || existing.kind !== command.kind)
       throw new Error("Environment hook identity mismatch");
@@ -51,7 +58,7 @@ export async function runEnvironmentHook(
   if (command.resumeOnly)
     throw new Error("Environment hook outcome is unknown after daemon restart");
   const controller = new AbortController();
-  const outcome: HookOutcome = { terminationUnverified: false };
+  const outcome: HookOutcome = { terminationUnverified: false, active: true };
   const done = Promise.resolve().then(
     async (): Promise<Record<string, never>> => {
       const run = command.kind === "setup" ? runSetupScript : runTeardownScript;
@@ -79,6 +86,8 @@ export async function runEnvironmentHook(
           outcome.terminationUnverified = true;
         }
         throw new Error(error instanceof Error ? error.message : String(error));
+      } finally {
+        outcome.active = false;
       }
       return {};
     },
@@ -91,6 +100,18 @@ export async function runEnvironmentHook(
     kind: command.kind,
   });
   return done;
+}
+
+export async function cancelEnvironmentHooks(
+  runtimeManager: CommandDispatchOptions["runtimeManager"],
+): Promise<void> {
+  const running = [...(operations.get(runtimeManager)?.values() ?? [])].filter(
+    (operation) => operation !== "cancelled",
+  );
+  for (const operation of running) operation.controller.abort();
+  await Promise.all(
+    running.map((operation) => operation.done.catch(() => undefined)),
+  );
 }
 
 export async function cancelEnvironmentHook(
@@ -108,4 +129,22 @@ export async function cancelEnvironmentHook(
   return {
     status: operation.outcome.terminationUnverified ? "unknown" : "terminated",
   };
+}
+
+export async function inspectEnvironmentCleanup(
+  command: CommandOf<"environment.inspect_cleanup">,
+  options: CommandDispatchOptions,
+) {
+  const inspection = await inspectWorkspaceProcesses(command.path);
+  const active =
+    options.runtimeManager.hasPendingEnvironmentProvision(
+      command.environmentId,
+    ) ||
+    [...controllers(options).values()].some(
+      (operation) =>
+        operation !== "cancelled" &&
+        operation.path === command.path &&
+        operation.outcome.active,
+    );
+  return { ...inspection, active };
 }

@@ -29,7 +29,6 @@ function renderLoadingPanel({
     <PanelGroup direction="horizontal">
       <LazyThreadSecondaryPanel
         activeTab={null}
-        canUseGitUi={false}
         drawerFallback={null}
         fixedTabs={[]}
         isConversationCollapsed={isConversationCollapsed}
@@ -92,6 +91,7 @@ describe("LazyBrowserTabDeck", () => {
         canShowNativeBrowserView={false}
         environmentId="env-1"
         onUpdate={noop}
+        onOpenInNewTab={null}
         threadId="thread-1"
       />
     );

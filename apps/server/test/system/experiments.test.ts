@@ -28,8 +28,7 @@ function putGeneralSettings(harness: TestAppHarness, body: object) {
 
 async function configExperiments(harness: TestAppHarness) {
   const response = await harness.app.request("/api/v1/system/config");
-  return systemConfigResponseSchema.parse(await readJson(response))
-    .experiments;
+  return systemConfigResponseSchema.parse(await readJson(response)).experiments;
 }
 
 describe("experiments settings", () => {
@@ -39,11 +38,18 @@ describe("experiments settings", () => {
       expect(response.status).toBe(200);
       const body = systemConfigResponseSchema.parse(await readJson(response));
       expect(body.experiments).toEqual({
-        changelogPreview: false,
+        applicationLinks: false,
         compactExpiredCache: false,
         serverMove: false,
         performanceDiagnostics: false,
+        pluginUpdates: false,
+        sidebarMultiSelect: false,
+        skipFocusedThreadNotifications: false,
+        threadContextCard: false,
+        threadRowMetadata: false,
         timelinePush: false,
+        unreadDividerAtAnswer: false,
+        websocketCompression: false,
       });
     });
   });
@@ -68,38 +74,66 @@ describe("experiments settings", () => {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          changelogPreview: true,
+          applicationLinks: true,
           compactExpiredCache: true,
           serverMove: true,
           performanceDiagnostics: true,
+          pluginUpdates: true,
+          sidebarMultiSelect: true,
+          skipFocusedThreadNotifications: true,
+          threadContextCard: true,
+          threadRowMetadata: true,
           timelinePush: true,
+          unreadDividerAtAnswer: true,
+          websocketCompression: true,
         }),
       });
       expect(put.status).toBe(200);
       expect(experimentsSchema.parse(await readJson(put))).toEqual({
-        changelogPreview: true,
+        applicationLinks: true,
         compactExpiredCache: true,
         serverMove: true,
         performanceDiagnostics: true,
+        pluginUpdates: true,
+        sidebarMultiSelect: true,
+        skipFocusedThreadNotifications: true,
+        threadContextCard: true,
+        threadRowMetadata: true,
         timelinePush: true,
+        unreadDividerAtAnswer: true,
+        websocketCompression: true,
       });
       expect(getExperiments(harness.db)).toEqual({
-        changelogPreview: true,
+        applicationLinks: true,
         compactExpiredCache: true,
         serverMove: true,
         performanceDiagnostics: true,
+        pluginUpdates: true,
+        sidebarMultiSelect: true,
+        skipFocusedThreadNotifications: true,
+        threadContextCard: true,
+        threadRowMetadata: true,
         timelinePush: true,
+        unreadDividerAtAnswer: true,
+        websocketCompression: true,
       });
 
       const config = await harness.app.request("/api/v1/system/config");
       expect(
         systemConfigResponseSchema.parse(await readJson(config)).experiments,
       ).toEqual({
-        changelogPreview: true,
+        applicationLinks: true,
         compactExpiredCache: true,
         serverMove: true,
         performanceDiagnostics: true,
+        pluginUpdates: true,
+        sidebarMultiSelect: true,
+        skipFocusedThreadNotifications: true,
+        threadContextCard: true,
+        threadRowMetadata: true,
         timelinePush: true,
+        unreadDividerAtAnswer: true,
+        websocketCompression: true,
       });
     });
   });
@@ -107,14 +141,21 @@ describe("experiments settings", () => {
   it("changes only the experiments a PUT names", async () => {
     await withTestHarness(async (harness) => {
       await putExperiments(harness, { serverMove: true });
-      const put = await putExperiments(harness, { changelogPreview: true });
+      const put = await putExperiments(harness, { timelinePush: true });
       expect(put.status).toBe(200);
       expect(experimentsSchema.parse(await readJson(put))).toEqual({
-        changelogPreview: true,
+        applicationLinks: false,
         compactExpiredCache: false,
         serverMove: true,
         performanceDiagnostics: false,
-        timelinePush: false,
+        pluginUpdates: false,
+        sidebarMultiSelect: false,
+        skipFocusedThreadNotifications: false,
+        threadContextCard: false,
+        threadRowMetadata: false,
+        timelinePush: true,
+        unreadDividerAtAnswer: false,
+        websocketCompression: false,
       });
       expect(
         harness.db.$client
@@ -123,7 +164,7 @@ describe("experiments settings", () => {
           )
           .all()
           .map((row) => row.key),
-      ).toEqual(["changelogPreview", "serverMove"]);
+      ).toEqual(["serverMove", "timelinePush"]);
     });
   });
 
@@ -140,7 +181,10 @@ describe("experiments settings", () => {
 
   it("serves the early adopter defaults while the setting is on and keeps experiments the user set", async () => {
     await withTestHarness(async (harness) => {
-      await putExperiments(harness, { timelinePush: false });
+      await putExperiments(harness, {
+        timelinePush: false,
+        applicationLinks: false,
+      });
       expect(
         (
           await putGeneralSettings(harness, {
@@ -152,10 +196,12 @@ describe("experiments settings", () => {
       expect(await configExperiments(harness)).toEqual({
         ...earlyAdopterExperiments,
         timelinePush: false,
+        applicationLinks: false,
       });
 
       harness.db.$client.prepare("DELETE FROM system_experiments").run();
       expect(await configExperiments(harness)).toEqual(earlyAdopterExperiments);
+      expect((await configExperiments(harness)).applicationLinks).toBe(true);
 
       const { earlyAdopter: omitted, ...legacy } = defaultAppSettings;
       expect(omitted).toBe(false);

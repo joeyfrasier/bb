@@ -1,3 +1,4 @@
+import type { AvailableModel } from "@bb/domain";
 import type { DeltaItemShape } from "@bb/provider-bridge-protocol";
 import { basename } from "node:path";
 import { z } from "zod";
@@ -42,11 +43,13 @@ export interface AcpDialect {
   ): AcpClassifiedToolCall | undefined;
   commandResult?(event: AcpToolCallUpdateEvent): AcpCommandResult | undefined;
   normalizeCommandEvent?(event: AcpToolCallUpdateEvent): AcpToolCallUpdateEvent;
+  readonly clientRequestMethods?: readonly string[];
   handleClientRequest?(
     method: string,
     params: unknown,
   ): AcpClientRequestOutcome | undefined;
   maintenance?: AcpMaintenanceDialect;
+  presentModel?(model: AvailableModel): AvailableModel;
 }
 
 export interface AcpClientRequestOutcome {
@@ -271,6 +274,7 @@ function cursorHandleClientRequest(
 export const CURSOR_ACP_DIALECT: AcpDialect = {
   id: "cursor",
   classifyToolCall: cursorClassifyToolCall,
+  clientRequestMethods: [CURSOR_TASK_METHOD],
   handleClientRequest: cursorHandleClientRequest,
   maintenance: CURSOR_ACP_MAINTENANCE,
 };
@@ -389,9 +393,26 @@ export function compactionOutcomeForEndTurn(
     : { status: "failed", error: text };
 }
 
+function presentProviderPrefixedModel(model: AvailableModel): AvailableModel {
+  const separator = model.id.indexOf("/");
+  if (separator <= 0) {
+    return model;
+  }
+  const routeProviderId = model.id.slice(0, separator);
+  const prefix = `${routeProviderId}/`;
+  return {
+    ...model,
+    displayName: model.displayName.startsWith(prefix)
+      ? model.displayName.slice(prefix.length)
+      : model.displayName,
+    routeProviderId,
+  };
+}
+
 export const OMP_ACP_DIALECT: AcpDialect = {
   id: "omp",
   commandResult: ompCommandResult,
+  presentModel: presentProviderPrefixedModel,
 };
 
 const openCodeCommandRawOutputSchema = z
@@ -445,14 +466,32 @@ function normalizeOpenCodeCommandEvent(
 export const OPENCODE_ACP_DIALECT: AcpDialect = {
   id: "opencode",
   normalizeCommandEvent: normalizeOpenCodeCommandEvent,
+  presentModel: presentProviderPrefixedModel,
 };
 
-const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
-  [CURSOR_ACP_DIALECT.id, CURSOR_ACP_DIALECT],
-  [GROK_ACP_DIALECT.id, GROK_ACP_DIALECT],
-  [OMP_ACP_DIALECT.id, OMP_ACP_DIALECT],
-  [OPENCODE_ACP_DIALECT.id, OPENCODE_ACP_DIALECT],
-]);
+const BUILT_IN_DIALECTS: readonly AcpDialect[] = [
+  GENERIC_ACP_DIALECT,
+  CURSOR_ACP_DIALECT,
+  GROK_ACP_DIALECT,
+  OMP_ACP_DIALECT,
+  OPENCODE_ACP_DIALECT,
+];
+
+const DIALECTS_BY_ID = new Map<string, AcpDialect>(
+  BUILT_IN_DIALECTS.map((dialect) => [dialect.id, dialect]),
+);
+
+export function registerAcpDialect(dialect: AcpDialect): void {
+  if (dialect.id.trim() === "") {
+    throw new Error("An ACP dialect needs a non-empty id.");
+  }
+  if (BUILT_IN_DIALECTS.some((builtIn) => builtIn.id === dialect.id)) {
+    throw new Error(
+      `ACP dialect id "${dialect.id}" is reserved by a built-in dialect.`,
+    );
+  }
+  DIALECTS_BY_ID.set(dialect.id, dialect);
+}
 
 const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
   "cursor-agent": CURSOR_ACP_DIALECT.id,

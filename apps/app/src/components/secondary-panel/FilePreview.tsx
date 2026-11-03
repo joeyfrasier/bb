@@ -31,7 +31,7 @@ import {
 import { EmptyStatePanel } from "@bb/shared-ui/empty-state";
 import { CopyButton } from "@/components/ui/copy-button.js";
 import { Icon } from "@bb/shared-ui/icon";
-import { OpenInEditorButton } from "@/components/ui/open-in-editor-button.js";
+import { OpenInEditorButton } from "@bb/shared-ui/open-in-editor-button";
 import { useAppCommandShortcut } from "@/components/commands/AppCommandProvider";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
@@ -44,16 +44,16 @@ import {
   TooltipTrigger,
 } from "@bb/shared-ui/tooltip";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
-import { formatByteSize } from "@/lib/format-byte-size";
+import { formatByteSize } from "@bb/shared-ui/lib/format-byte-size";
 import { saveFile } from "@/lib/save-file";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import type {
   FilePreviewLineRange,
   UnsupportedFilePreviewReason,
-  WorkspaceFilePreviewStatusLabel,
 } from "@bb/client-core";
 import {
   DEFAULT_CODE_OVERFLOW_MODE,
+  LINE_WRAP_LABEL,
   type CodeOverflowMode,
   type CodeOverflowModeChangeHandler,
 } from "@/lib/code-overflow-mode";
@@ -125,7 +125,7 @@ interface FilePreviewProps {
   onRefresh?: () => void;
   isRefreshing?: boolean;
   markdownLinkRouting?: MarkdownLinkRouting;
-  statusLabel?: WorkspaceFilePreviewStatusLabel | null;
+  statusLabel?: string | null;
 }
 
 interface FilePreviewBodyProps {
@@ -156,7 +156,7 @@ interface FilePreviewHeaderProps {
   onOpenInEditor?: (path: string) => void;
   onRefresh?: () => void;
   isRefreshing: boolean;
-  statusLabel: WorkspaceFilePreviewStatusLabel | null;
+  statusLabel: string | null;
   toggleKind: FilePreviewToggleKind | null;
   showLineOverflowToggle: boolean;
   lineOverflowMode: CodeOverflowMode;
@@ -292,10 +292,6 @@ function getFileContentsCopyLabel(kind: FilePreviewToggleKind | null): string {
     return "Copy HTML source";
   }
   return "Copy file contents";
-}
-
-function getLineWrapToggleLabel(lineOverflowMode: CodeOverflowMode): string {
-  return lineOverflowMode === "wrap" ? "Disable line wrap" : "Wrap lines";
 }
 
 function getFilePreviewLineRange(
@@ -534,17 +530,23 @@ export function FilePreview({
     state.textPreviewKind === "csv" &&
     bodyViewMode === "preview";
   const usesFullHeightLayout =
-    usesIframeLayout || usesCsvPreviewLayout || usesCodeLayout;
-  const usesContentHeightLayout = usesMarkdownPreviewLayout;
+    usesIframeLayout ||
+    usesCsvPreviewLayout ||
+    usesCodeLayout ||
+    usesMarkdownPreviewLayout;
 
   return (
     <div
       className={
         usesFullHeightLayout
-          ? "@container/page flex h-full min-h-0 flex-col"
-          : usesContentHeightLayout
-            ? "@container/page flex min-h-full flex-col"
-            : "@container/page min-h-full"
+          ? cn(
+              "@container/page flex h-full min-h-0 flex-col",
+              usesMarkdownPreviewLayout && "overflow-y-auto",
+            )
+          : "@container/page min-h-full"
+      }
+      data-file-preview-scroll-container={
+        usesMarkdownPreviewLayout ? "" : undefined
       }
       style={FILE_PREVIEW_WRAPPER_STYLE}
     >
@@ -945,7 +947,8 @@ function FilePreviewHeader({
                           onLineOverflowModeChange(checked ? "wrap" : "scroll")
                         }
                       >
-                        <Icon name="TextWrap" aria-hidden /> Wrap lines
+                        <Icon name="TextWrap" aria-hidden />
+                        {LINE_WRAP_LABEL}
                       </DropdownMenuCheckboxItem>
                     </>
                   ) : null}
@@ -967,8 +970,6 @@ function FilePreviewLineWrapButton({
     return null;
   }
 
-  const label = getLineWrapToggleLabel(lineOverflowMode);
-
   return (
     <TooltipProvider delayDuration={300}>
       <Tooltip>
@@ -981,7 +982,7 @@ function FilePreviewLineWrapButton({
               FILE_PREVIEW_HEADER_ICON_BUTTON_CLASS,
               "text-muted-foreground",
             )}
-            aria-label={label}
+            aria-label={LINE_WRAP_LABEL}
             aria-pressed={lineOverflowMode === "wrap"}
             onClick={() => {
               onLineOverflowModeChange(
@@ -992,7 +993,7 @@ function FilePreviewLineWrapButton({
             <Icon name="TextWrap" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="bottom">{label}</TooltipContent>
+        <TooltipContent side="bottom">{LINE_WRAP_LABEL}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );

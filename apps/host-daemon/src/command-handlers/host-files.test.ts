@@ -15,7 +15,6 @@ import {
   browseHostDirectory,
   readHostFile,
   readHostFileChunk,
-  readHostRelativeFile,
 } from "./host-files.js";
 
 const execFileAsync = promisify(execFile);
@@ -25,6 +24,20 @@ async function runGit(
 ): Promise<string> {
   const result = await execFileAsync("git", [...args], { cwd: options.cwd });
   return result.stdout;
+}
+
+async function mountSubstDrive(target: string): Promise<string> {
+  for (const letter of "ZYXWVUTSRQPONMLKJIHGFED") {
+    const drive = `${letter}:\\`;
+    const inUse = await fs.stat(drive).then(
+      () => true,
+      () => false,
+    );
+    if (inUse) continue;
+    await execFileAsync("subst", [`${letter}:`, target]);
+    return drive;
+  }
+  throw new Error("No free drive letter for subst");
 }
 
 async function captureReadHostFileError(
@@ -39,18 +52,6 @@ async function captureReadHostFileError(
   throw new Error("Expected readHostFile to fail");
 }
 
-async function captureReadHostRelativeFileError(
-  command: CommandOf<"host.read_file_relative">,
-): Promise<unknown> {
-  try {
-    await readHostRelativeFile(command);
-  } catch (error) {
-    return error;
-  }
-
-  throw new Error("Expected readHostRelativeFile to fail");
-}
-
 describe("readHostFile (no ref — disk read)", () => {
   it("reads explicit file contents from disk without a rootPath", async () => {
     const repoPath = await initRepo(await makeTempDir("bb-host-files-test-"), {
@@ -61,6 +62,7 @@ describe("readHostFile (no ref — disk read)", () => {
 
     const result = await readHostFile({
       type: "host.read_file",
+      followRootSymlink: false,
       path: filePath,
     });
 
@@ -79,6 +81,7 @@ describe("readHostFile (no ref — disk read)", () => {
 
     const result = await readHostFile({
       type: "host.read_file",
+      followRootSymlink: false,
       path: filePath,
       rootPath: repoPath,
     });
@@ -99,6 +102,7 @@ describe("readHostFile (no ref — disk read)", () => {
 
     const result = await readHostFile({
       type: "host.read_file",
+      followRootSymlink: false,
       path: filePath,
       rootPath: repoPath,
       ifNoneMatch: { kind: "sha256", values: [sha256] },
@@ -114,6 +118,7 @@ describe("readHostFile (no ref — disk read)", () => {
 
     const changed = await readHostFile({
       type: "host.read_file",
+      followRootSymlink: false,
       path: filePath,
       rootPath: repoPath,
       ifNoneMatch: { kind: "sha256", values: ["0".repeat(64)] },
@@ -127,6 +132,7 @@ describe("readHostFile (no ref — disk read)", () => {
     await expect(
       readHostFile({
         type: "host.read_file",
+        followRootSymlink: false,
         path: "relative/file.txt",
         rootPath: "/tmp",
       }),
@@ -143,6 +149,7 @@ describe("readHostFile (no ref — disk read)", () => {
     const missingPath = path.join(repoPath, "notes.md");
     const thrown = await captureReadHostFileError({
       type: "host.read_file",
+      followRootSymlink: false,
       path: missingPath,
       rootPath: repoPath,
     });
@@ -163,6 +170,7 @@ describe("readHostFile (no ref — disk read)", () => {
     const missingPath = path.join(repoPath, "HOST-NOTES.md");
     const thrown = await captureReadHostFileError({
       type: "host.read_file",
+      followRootSymlink: false,
       path: missingPath,
     });
 
@@ -180,6 +188,7 @@ describe("readHostFile (no ref — disk read)", () => {
     const missingPath = path.join(rootPath, "notes.md");
     const thrown = await captureReadHostFileError({
       type: "host.read_file",
+      followRootSymlink: false,
       path: missingPath,
       rootPath,
     });
@@ -192,22 +201,26 @@ describe("readHostFile (no ref — disk read)", () => {
     expect(isExpectedCommandDispatchError(thrown)).toBe(true);
   });
 
-  it("marks missing relative read roots as expected", async () => {
-    const parentPath = await makeTempDir("bb-host-files-relative-root-");
-    const rootPath = path.join(parentPath, "STATUS");
-    const thrown = await captureReadHostRelativeFileError({
-      type: "host.read_file_relative",
-      rootPath,
-      path: "index.html",
-      dotfiles: "deny",
-    });
+  it("rejects oversized reads under a followed root before loading them", async () => {
+    const parentPath = await makeTempDir("bb-host-files-large-");
+    const realRoot = path.join(parentPath, "real");
+    const linkedRoot = path.join(parentPath, "linked");
+    await fs.mkdir(realRoot);
+    await fs.symlink(realRoot, linkedRoot, "dir");
+    await fs.writeFile(path.join(realRoot, "SKILL.md"), "");
+    await fs.truncate(path.join(realRoot, "SKILL.md"), 25 * 1024 * 1024 + 1);
 
-    expect(thrown).toMatchObject({
-      code: "ENOENT",
-      message: "Path does not exist: index.html",
-      name: "ExpectedCommandDispatchError",
+    await expect(
+      readHostFile({
+        type: "host.read_file",
+        path: path.join(linkedRoot, "SKILL.md"),
+        rootPath: linkedRoot,
+        followRootSymlink: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "file_too_large",
+      message: "File size 26214401 bytes exceeds the 25 MB limit",
     });
-    expect(isExpectedCommandDispatchError(thrown)).toBe(true);
   });
 
   it("rejects rootless directory paths", async () => {
@@ -218,6 +231,7 @@ describe("readHostFile (no ref — disk read)", () => {
     await expect(
       readHostFile({
         type: "host.read_file",
+        followRootSymlink: false,
         path: repoPath,
       }),
     ).rejects.toMatchObject({
@@ -232,6 +246,7 @@ describe("readHostFile (no ref — disk read)", () => {
       await expect(
         readHostFile({
           type: "host.read_file",
+          followRootSymlink: false,
           path: "/dev/zero",
         }),
       ).rejects.toMatchObject({
@@ -277,6 +292,34 @@ describe("browseHostDirectory", () => {
     ]);
   });
 
+  it.runIf(process.platform === "win32")(
+    "lists every mounted drive and stays on the drive the user picked",
+    async () => {
+      const target = await makeTempDir("bb-browse-drive-");
+      const drive = await mountSubstDrive(target);
+      try {
+        await fs.writeFile(path.join(target, "on-drive.txt"), "x", "utf8");
+        const systemDrive = `${process.env.SystemDrive ?? "C:"}\\`;
+
+        const result = await browseHostDirectory({
+          type: "host.browse_directory",
+          path: drive,
+        });
+
+        expect(result.directory).toBe(drive);
+        expect(result.parent).toBeNull();
+        expect(result.entries.map((entry) => entry.path)).toEqual([
+          `${drive}on-drive.txt`,
+        ]);
+        expect(result.roots).toEqual(
+          expect.arrayContaining([systemDrive, drive]),
+        );
+      } finally {
+        await execFileAsync("subst", [drive.slice(0, 2), "/D"]);
+      }
+    },
+  );
+
   it("defaults to the host home directory when no path is given", async () => {
     const result = await browseHostDirectory({
       type: "host.browse_directory",
@@ -320,6 +363,7 @@ describe("readHostFile (with ref — git history read)", () => {
     await expect(
       readHostFile({
         type: "host.read_file",
+        followRootSymlink: false,
         path: path.join(repoPath, "tracked.txt"),
         ref: "HEAD",
       }),
@@ -339,6 +383,7 @@ describe("readHostFile (with ref — git history read)", () => {
 
     const result = await readHostFile({
       type: "host.read_file",
+      followRootSymlink: false,
       path: path.join(repoPath, "missing.txt"),
       rootPath: repoPath,
       ref: "HEAD",
@@ -359,6 +404,7 @@ describe("readHostFile (with ref — git history read)", () => {
     await expect(
       readHostFile({
         type: "host.read_file",
+        followRootSymlink: false,
         path: path.join(repoPath, "f.txt"),
         rootPath: repoPath,
         ref: "HEAD/../foo",
@@ -373,6 +419,7 @@ describe("readHostFile (with ref — git history read)", () => {
     await expect(
       readHostFile({
         type: "host.read_file",
+        followRootSymlink: false,
         path: path.join(repoPath, "f.txt"),
         rootPath: repoPath,
         ref: "-rf",
@@ -391,6 +438,7 @@ describe("readHostFile (with ref — git history read)", () => {
     await expect(
       readHostFile({
         type: "host.read_file",
+        followRootSymlink: false,
         path: "/etc/passwd",
         rootPath: repoPath,
         ref: "HEAD",
@@ -415,6 +463,7 @@ describe("readHostFile (with ref — git history read)", () => {
 
     const result = await readHostFile({
       type: "host.read_file",
+      followRootSymlink: false,
       path: filePath,
       rootPath: repoPath,
       ref: firstSha,
@@ -462,7 +511,12 @@ describe("readHostFileChunk", () => {
     });
     expect(Buffer.from(eof.content, "base64")).toEqual(Buffer.from([3]));
     await expect(
-      readHostFile({ type: "host.read_file", path: filePath, rootPath }),
+      readHostFile({
+        type: "host.read_file",
+        path: filePath,
+        rootPath,
+        followRootSymlink: false,
+      }),
     ).rejects.toThrow("exceeds");
   });
 

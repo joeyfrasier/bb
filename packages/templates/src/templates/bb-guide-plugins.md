@@ -149,7 +149,7 @@ Each bundled plugin documents its commands and behavior in its own skill.
   `bb concurrency-limit status|global|host`; see the `concurrency-limit`
   skill.
 - Provider retry (builtin): queues an automatic retry after provider
-  overloads and subscription-window limits.
+  overloads, server or connection errors, and subscription-window limits.
   `bb provider-retry status|explain|retry|cancel`; see the `provider-retry`
   skill.
 - Thread list (builtin): owns the sidebar's layout preferences, synced to
@@ -270,10 +270,15 @@ list. To publish a marketplace, see the bb-plugin-authoring skill.
 
 Updates and pinning
 
-Updates are manual: `bb plugin outdated` checks tracking sources and
-`bb plugin update` applies compatible candidates. Reinstalling an installed
-managed plugin is refused; use `bb plugin update`. A failed activation restores
-the previous version and leaves the failure visible.
+bb checks tracking sources every six hours. With the `pluginUpdates`
+experiment on (`bb settings experiment pluginUpdates true`, on for early
+adopters), Settings → Updates checks again when it opens, lists each compatible
+update with an Update button and Update all, shows candidates blocked by
+engines.bb or engines.bbPluginSdk with the reason, and the sidebar updates
+badge counts plugin updates. Updates are never applied automatically: `bb plugin outdated` checks on
+demand and `bb plugin update` applies compatible candidates. Reinstalling an
+installed managed plugin is refused; use `bb plugin update`. A failed
+activation restores the previous version and leaves the failure visible.
 
 Exact npm versions, Git tags and commits, path sources, and bundled official
 plugins are pinned. npm ranges, dist-tags, and omitted specs, omitted Git refs
@@ -322,7 +327,10 @@ Authoring a plugin
   bb plugin build [path]         Compile the plugin into dist/; no server
                                  required
   bb plugin types [path] [--check]  Sync the plugin's SDK and shimmed-package
-                                 type pins to this bb; --check only reports
+                                 type pins to this bb; keep the SDK in
+                                 dependencies when an entry needs its own
+                                 SDK install; --check reports stale pins
+                                 and the wrong dependency field
   bb plugin migrate [path] [--yes]  Move a plugin that vendors types/ to the
                                  @get-bb/plugin-sdk npm package
 
@@ -336,7 +344,7 @@ plugins.
 
 `bb plugin rpc list [plugin-id] [--method <exact-name>] [--json]` lists discoverable methods from running plugins, optionally restricted to one plugin. `bb plugin rpc inspect <plugin-id> [method] [--json]` dumps registration and method descriptions plus input/output JSON Schemas. Copy the relevant schema into your consumer and call the existing plugin RPC endpoint. Discovery is opt-in advertising, not access control; method names may carry versions such as `provider-usage.v1.listResources`.
 
-`bb plugin rpc call <plugin-id> <method> [--input-file <json-path>] [--json]` invokes a method using server-side schema validation. Omitting the input file sends JSON null. Input files avoid putting sensitive values in command arguments.
+`bb plugin rpc call <plugin-id> <method> [--input-file <json-path>] [--json]` invokes a method using server-side schema validation. Omitting the input file sends JSON null. Input files avoid putting sensitive values in command arguments. Handler refusals print their code and message and exit non-zero: `forbidden` (403), `not_found` (404), `conflict` (409), or `invalid` (422).
 
 ### Background updates
 

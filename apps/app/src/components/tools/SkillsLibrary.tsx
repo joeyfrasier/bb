@@ -14,10 +14,7 @@ import {
 import { PERSONAL_PROJECT_ID } from "@bb/domain";
 import { buildSkillEditThreadPrompt } from "@bb/shared-ui/resource-edit-prompt";
 import type { EditableSkillScope, SkillSummary } from "@bb/server-contract";
-import {
-  ResourceListState,
-  useResourceRouteLabel,
-} from "@bb/shared-ui/resource-list";
+import { ResourceListState } from "@bb/shared-ui/resource-list";
 import {
   RegistrySkillDetailView,
   RegistrySkillsBrowsePage,
@@ -32,7 +29,7 @@ import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { isSkillEditable } from "@/components/tools/skill-taxonomy";
 import { CREATE_SKILL_PROMPT } from "@bb/client-core";
 import { usePrimaryHost } from "@/hooks/queries/host-queries";
-import { getAbsoluteDirname } from "@/lib/absolute-file-path";
+import { getAbsoluteDirname } from "@bb/shared-ui/lib/absolute-file-path";
 import { buildMarkdownHostFileImageRouting } from "@/components/ui/markdown-file-image-routing";
 import {
   buildRegistrySkillReferencePrompt,
@@ -44,8 +41,9 @@ import {
   REGISTRY_PAGE_SIZE,
   registryRepositoryKey,
   resolveInstalledRegistrySkill,
+  type RegistryRanking,
+  type RegistrySkill,
 } from "@/lib/skills-registry";
-import type { RegistryRanking, RegistrySkill } from "@/lib/skills-registry";
 import {
   getRegistrySkillDetailRoutePath,
   getRegistrySkillsRoutePath,
@@ -391,9 +389,6 @@ export function SkillsLibrary() {
   });
   const selectedRegistrySkill =
     registrySkillOnPage ?? registryEntryQuery.data ?? null;
-  useResourceRouteLabel(
-    selectedSkill?.name ?? selectedRegistrySkill?.name ?? null,
-  );
   const registryDetailQuery = useQuery({
     queryKey: ["skills-registry-detail", selectedRegistrySkill?.id ?? "none"],
     queryFn: ({ signal }) =>

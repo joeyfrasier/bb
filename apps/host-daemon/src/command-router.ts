@@ -66,11 +66,12 @@ export interface CommandRouterOptions {
   desktopBrowserBroker?: CommandDispatchOptions["desktopBrowserBroker"];
   dataDir: CommandDispatchOptions["dataDir"];
   fetchProjectAttachment: CommandDispatchOptions["fetchProjectAttachment"];
-  fetchSkillTree?: CommandDispatchOptions["fetchSkillTree"];
+  skillTreeTransport?: CommandDispatchOptions["skillTreeTransport"];
   fetchPluginHostArtifact?: CommandDispatchOptions["fetchPluginHostArtifact"];
   runtimeManager: RuntimeManager;
   eventSink: CommandDispatchOptions["eventSink"];
   listModels: CommandDispatchOptions["listModels"];
+  listCommands: CommandDispatchOptions["listCommands"];
   providerHealth: CommandDispatchOptions["providerHealth"];
   providerUsage: CommandDispatchOptions["providerUsage"];
   providerInstallationStatus: CommandDispatchOptions["providerInstallationStatus"];
@@ -302,13 +303,14 @@ export class CommandRouter {
   private createDispatchOptions(): CommandDispatchOptions {
     return {
       fetchProjectAttachment: this.options.fetchProjectAttachment,
-      fetchSkillTree: this.options.fetchSkillTree,
+      skillTreeTransport: this.options.skillTreeTransport,
       fetchPluginHostArtifact: this.options.fetchPluginHostArtifact,
       runtimeManager: this.options.runtimeManager,
       desktopBrowserBroker: this.options.desktopBrowserBroker,
       dataDir: this.options.dataDir,
       eventSink: this.options.eventSink,
       listModels: this.options.listModels,
+      listCommands: this.options.listCommands,
       providerHealth: this.options.providerHealth,
       providerUsage: this.options.providerUsage,
       providerInstallationStatus: this.options.providerInstallationStatus,

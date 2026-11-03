@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import type {
   TimelineConversationAttachments,
@@ -22,7 +23,7 @@ import {
   parseLocalFileHref,
   resolveRelativeLocalFileHref,
 } from "@/components/ui/markdown-local-file-link.js";
-import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
+import type { PromptMentionLinkResolver } from "@bb/client-core";
 import {
   computeMutedPrefixLength,
   parseAutomationDueMessage,
@@ -82,10 +83,10 @@ import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-messag
 import { markStreamTrace } from "@/lib/stream-trace";
 
 interface ConversationMessageContentBaseProps {
+  actionMetadata?: ReactNode;
   attachments: TimelineConversationAttachments | null;
   onCopyLink?: () => void;
   onOpenLocalFileLink?: ThreadTimelineLocalFileLinkHandler;
-  onOpenPluginPanel?: MarkdownMessageDirectives["openThreadPanel"];
   pluginActions?: readonly ThreadTimelinePluginMessageAction[];
   projectId?: string;
   resolveUserAttachmentImageSrc?: UserAttachmentImageSrcResolver;
@@ -154,6 +155,7 @@ type ConversationMessageContentProps =
   | ConversationMessageContentAssistantProps;
 
 interface UserConversationMessageProps {
+  actionMetadata?: ReactNode;
   addToChatAttachments: readonly PromptDraftAttachment[];
   attachmentItems: ConversationAttachmentItems;
   pluginActions?: readonly ThreadTimelinePluginMessageAction[];
@@ -182,6 +184,7 @@ interface UserConversationMessageProps {
 }
 
 interface AssistantConversationMessageProps extends AssistantMessageRowIdentity {
+  actionMetadata?: ReactNode;
   addToChatAttachments: readonly PromptDraftAttachment[];
   attachmentItems: ConversationAttachmentItems;
   pluginActions?: readonly ThreadTimelinePluginMessageAction[];
@@ -192,7 +195,6 @@ interface AssistantConversationMessageProps extends AssistantMessageRowIdentity 
   onSelectProse?: (selection: MessageProseSelection | null) => void;
   onOpenLink?: ThreadTimelineLinkHandler;
   onOpenLocalFileLink?: ThreadTimelineLocalFileLinkHandler;
-  onOpenPluginPanel?: MarkdownMessageDirectives["openThreadPanel"];
   projectId?: string;
   showActions: boolean;
   mobileActionDisplay: "inline" | "overflow";
@@ -257,6 +259,7 @@ function CollapsibleMessageText({
     [body.mentions],
   );
   const isOverflowing = useIsOverflowing({
+    axis: "vertical",
     elementRef: bodyRef,
     enabled: !isExpanded,
     measurementKey: body.text,
@@ -277,8 +280,8 @@ function CollapsibleMessageText({
         ref={bodyRef}
         data-image-gallery-clipped={!isExpanded ? "" : undefined}
         className={cn(
-          "break-words",
-          !isExpanded && "max-h-[15lh] overflow-hidden",
+          "break-words overflow-x-auto",
+          !isExpanded && "max-h-[15lh] overflow-y-hidden",
         )}
         style={
           !isExpanded && showToggle ? COLLAPSED_MESSAGE_FADE_STYLE : undefined
@@ -288,6 +291,7 @@ function CollapsibleMessageText({
           <span>{body.text}</span>
         ) : (
           <MarkdownPreview
+            tableLayout="contained"
             content={
               collapsedPreview?.wasCapped === true
                 ? closeUnterminatedMarkdownCodeSpan(body.text)
@@ -337,6 +341,7 @@ function buildAddToChatAttachments(
 }
 
 function UserConversationMessage({
+  actionMetadata,
   addToChatAttachments,
   attachmentItems,
   initiator,
@@ -494,6 +499,7 @@ function UserConversationMessage({
             onCopyLink={onCopyLink}
             onEdit={onEdit}
             pluginActions={pluginActions}
+            metadata={actionMetadata}
           />
         </div>
       </div>
@@ -502,6 +508,7 @@ function UserConversationMessage({
 }
 
 function AssistantConversationMessage({
+  actionMetadata,
   addToChatAttachments,
   attachmentItems,
   id,
@@ -512,7 +519,6 @@ function AssistantConversationMessage({
   onSelectProse,
   onOpenLink,
   onOpenLocalFileLink,
-  onOpenPluginPanel,
   pluginActions,
   projectId,
   showActions,
@@ -590,7 +596,6 @@ function AssistantConversationMessage({
         projectId: projectId ?? null,
       },
       openWorkspaceFile: openDirectiveWorkspaceFile,
-      openThreadPanel: onOpenPluginPanel ?? null,
     };
   }, [
     messageDirectiveRegistry,
@@ -599,7 +604,6 @@ function AssistantConversationMessage({
     turnId,
     projectId,
     openDirectiveWorkspaceFile,
-    onOpenPluginPanel,
   ]);
 
   const codeFenceRendererRegistry = useCodeFenceRendererRegistry();
@@ -654,7 +658,6 @@ function AssistantConversationMessage({
           <CodeFenceRendererHost
             registry={codeFenceRendererRegistry}
             message={codeFenceMessage}
-            openThreadPanel={onOpenPluginPanel ?? null}
             streaming={streaming}
           >
             {markdown}
@@ -685,6 +688,7 @@ function AssistantConversationMessage({
           onFork={onFork}
           disabled={forkDisabled}
           pluginActions={pluginActions}
+          metadata={actionMetadata}
         />
       ) : null}
     </div>
@@ -697,7 +701,6 @@ export function ConversationMessageContent(
   const {
     attachments,
     onOpenLocalFileLink,
-    onOpenPluginPanel,
     projectId,
     resolveUserAttachmentImageSrc,
     text,
@@ -719,6 +722,7 @@ export function ConversationMessageContent(
   if (props.role === "user") {
     return (
       <UserConversationMessage
+        actionMetadata={props.actionMetadata}
         addToChatAttachments={addToChatAttachments}
         attachmentItems={attachmentItems}
         pluginActions={props.pluginActions}
@@ -750,6 +754,7 @@ export function ConversationMessageContent(
 
   return (
     <AssistantConversationMessage
+      actionMetadata={props.actionMetadata}
       addToChatAttachments={addToChatAttachments}
       attachmentItems={attachmentItems}
       id={props.id}
@@ -761,7 +766,6 @@ export function ConversationMessageContent(
       onSelectProse={props.onSelectProse}
       onOpenLink={props.onOpenLink}
       onOpenLocalFileLink={onOpenLocalFileLink}
-      onOpenPluginPanel={onOpenPluginPanel}
       projectId={projectId}
       showActions={props.showActions}
       mobileActionDisplay={props.mobileActionDisplay}

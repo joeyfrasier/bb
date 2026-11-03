@@ -346,6 +346,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     const { environment, thread } = seedColdIdleThreadFixture(harness, 1);
 
     await sendThreadMessage(harness.deps, {
+      originPluginId: null,
       environment,
       payload: {
         input: pluginMentionInput({
@@ -402,6 +403,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     const { environment, thread } = seedColdIdleThreadFixture(harness, 11);
 
     await sendThreadMessage(harness.deps, {
+      originPluginId: null,
       environment,
       payload: {
         input: pluginMentionInput({
@@ -497,6 +499,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
 
     await expect(
       sendThreadMessage(harness.deps, {
+        originPluginId: null,
         environment,
         payload: {
           input: pluginMentionInput({
@@ -543,6 +546,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     await harness.pluginService.setEnabled("mentions", false);
     await expect(
       sendThreadMessage(harness.deps, {
+        originPluginId: null,
         environment,
         payload: {
           ...basePayload,
@@ -564,6 +568,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
 
     await expect(
       sendThreadMessage(harness.deps, {
+        originPluginId: null,
         environment,
         payload: {
           ...basePayload,
@@ -581,6 +586,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
 
     await expect(
       sendThreadMessage(harness.deps, {
+        originPluginId: null,
         environment,
         payload: {
           ...basePayload,
@@ -675,6 +681,8 @@ describe("mention search time box", () => {
       db,
       hub: {
         getDaemonSessionIdForHost: () => null,
+        notifyPluginChanged: () => {},
+        onWatchedTargets: () => () => {},
         notifyPluginSignal: () => 0,
         notifySystem: () => {},
       },
@@ -753,6 +761,8 @@ describe("mention resolve time box", () => {
       db,
       hub: {
         getDaemonSessionIdForHost: () => null,
+        notifyPluginChanged: () => {},
+        onWatchedTargets: () => () => {},
         notifyPluginSignal: () => 0,
         notifySystem: () => {},
       },

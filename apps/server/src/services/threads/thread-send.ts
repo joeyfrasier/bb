@@ -77,7 +77,14 @@ import {
   type GroupedPrompt,
   type PromptWithGroups,
 } from "./deferred-first-turn-context.js";
-import type { TelemetryEvent } from "../system/telemetry.js";
+import type {
+  TelemetryEvent,
+  TelemetryInitiator,
+} from "../system/telemetry.js";
+import {
+  initiatorTelemetryProperty,
+  resolveTelemetryInitiator,
+} from "./telemetry-initiator.js";
 import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 
 type SendThreadMessageMode = SendMessageRequest["mode"];
@@ -101,6 +108,7 @@ interface SendThreadMessageArgs {
     forkSourceProviderThreadId: string | null;
     onCommandSettled?: () => void | Promise<void>;
   };
+  originPluginId: string | null;
   payload: SendThreadMessagePayload;
   thread: Thread;
   trigger: SendThreadMessageTrigger;
@@ -154,6 +162,7 @@ interface AppendAndQueueSendThreadMessageArgs {
   initiator: ThreadTurnInitiator;
   input: PromptInput[];
   inputGroups?: PromptInput[][];
+  originPluginId: string | null;
   queueInTransaction: SendThreadMessageQueueRequest;
   requestId: ClientTurnRequestId;
   senderThreadId: string | null;
@@ -380,11 +389,12 @@ type UserMessageSentProperties = Extract<
 >["properties"];
 
 export function captureUserMessageSentTelemetry(
-  deps: Pick<LoggedPendingInteractionWorkSessionDeps, "telemetry">,
+  deps: Pick<LoggedPendingInteractionWorkSessionDeps, "config" | "telemetry">,
   args: {
     isChildThread: boolean;
     messageSource: UserMessageSentProperties["message_source"];
     providerId: string;
+    initiator: TelemetryInitiator;
   },
 ): void {
   deps.telemetry.capture({
@@ -393,6 +403,7 @@ export function captureUserMessageSentTelemetry(
       is_child_thread: args.isChildThread,
       message_source: args.messageSource,
       provider: args.providerId,
+      ...initiatorTelemetryProperty(deps.config.featureFlags, args.initiator),
     },
   });
 }
@@ -406,6 +417,7 @@ function appendAndQueueSendThreadMessageInTransaction({
   initiator,
   input,
   inputGroups,
+  originPluginId,
   queueInTransaction,
   requestId,
   senderThreadId,
@@ -429,6 +441,7 @@ function appendAndQueueSendThreadMessageInTransaction({
             ...(inputGroups !== undefined ? { inputGroups } : {}),
             execution,
             initiator,
+            originPluginId,
             senderThreadId,
             requestMethod: "turn/start",
             source: "tell",
@@ -467,6 +480,9 @@ export async function sendThreadMessage(
 ): Promise<void> {
   if (isStandaloneBuiltinClearCommand(args.payload.input)) {
     await clearThreadContext(deps, {
+      ...(args.beforeAppendInTransaction !== undefined
+        ? { beforeCommitInTransaction: args.beforeAppendInTransaction }
+        : {}),
       environment: args.environment,
       thread: args.thread,
     });
@@ -563,6 +579,11 @@ async function sendThreadMessageWithoutContextClear(
   });
   const shouldCaptureUserMessageSent =
     args.trigger === "user" && initiator === "user" && input.length > 0;
+  const telemetryInitiator = resolveTelemetryInitiator({
+    origin: args.payload.originPluginId === undefined ? null : "plugin",
+    originPluginId: args.payload.originPluginId ?? null,
+    initiator,
+  });
   const expectedSteerTurnId =
     mode === "auto" || mode === "steer"
       ? getActiveTurnId(deps, thread.id)
@@ -606,6 +627,7 @@ async function sendThreadMessageWithoutContextClear(
       initiator,
       input,
       inputGroups,
+      originPluginId: args.originPluginId,
       senderThreadId,
       thread,
     })
@@ -615,6 +637,7 @@ async function sendThreadMessageWithoutContextClear(
         isChildThread: thread.parentThreadId !== null,
         messageSource: "thread_send",
         providerId: thread.providerId,
+        initiator: telemetryInitiator,
       });
     }
     return;
@@ -643,7 +666,6 @@ async function sendThreadMessageWithoutContextClear(
   if (mode === "start") {
     const commandArgs = {
       thread,
-      fork: null,
       input,
       ...(inputGroups !== undefined ? { inputGroups } : {}),
       requestId,
@@ -686,6 +708,7 @@ async function sendThreadMessageWithoutContextClear(
       initiator,
       input,
       inputGroups,
+      originPluginId: args.originPluginId,
       queueInTransaction: ({ tx }) => {
         const dispatchKind = command.mode;
         const currentThread = getThread(tx, thread.id);
@@ -741,6 +764,7 @@ async function sendThreadMessageWithoutContextClear(
         isChildThread: thread.parentThreadId !== null,
         messageSource: "thread_send",
         providerId: thread.providerId,
+        initiator: telemetryInitiator,
       });
     }
     return;
@@ -779,6 +803,7 @@ async function sendThreadMessageWithoutContextClear(
     initiator,
     input,
     inputGroups,
+    originPluginId: args.originPluginId,
     queueInTransaction: () => {
       return { activeThread: null };
     },
@@ -808,6 +833,7 @@ async function sendThreadMessageWithoutContextClear(
       isChildThread: thread.parentThreadId !== null,
       messageSource: "thread_send",
       providerId: thread.providerId,
+      initiator: telemetryInitiator,
     });
   }
 }

@@ -6,6 +6,14 @@ export const MANAGED_BRANCH_PREFIX_MAX_LENGTH = 64;
 
 export const DEFAULT_MANAGED_BRANCH_PREFIX = "bb/";
 
+export const IDLE_PROVIDER_SESSION_TIMEOUT_MINUTES = [
+  0, 5, 10, 30, 60,
+] as const;
+
+export const idleProviderSessionTimeoutMinutesSchema = z.literal(
+  IDLE_PROVIDER_SESSION_TIMEOUT_MINUTES,
+);
+
 export const managedBranchPrefixSchema = z
   .string()
   .max(MANAGED_BRANCH_PREFIX_MAX_LENGTH)
@@ -16,8 +24,8 @@ export const managedBranchPrefixSchema = z
 export const appSettingsSchema = z
   .object({
     showKeyboardHints: z.boolean(),
-    showGitChanges: z.boolean(),
     steerActiveThreadOnEnter: z.boolean(),
+    terminalCopyOnSelect: z.boolean(),
     confirmThreadArchive: z.boolean(),
     showDiagnosticEvents: z.boolean(),
     keepHistoryAfterContextClear: z.boolean(),
@@ -32,6 +40,7 @@ export const appSettingsSchema = z
     allowFastServiceTier: z.boolean(),
     telemetryEnabled: z.boolean(),
     managedBranchPrefix: managedBranchPrefixSchema,
+    idleProviderSessionTimeoutMinutes: idleProviderSessionTimeoutMinutesSchema,
     machineServerUrl: z
       .string()
       .url()
@@ -54,8 +63,8 @@ export type AppSettings = z.infer<typeof appSettingsSchema>;
 
 export const defaultAppSettings: AppSettings = {
   showKeyboardHints: true,
-  showGitChanges: true,
   steerActiveThreadOnEnter: true,
+  terminalCopyOnSelect: true,
   confirmThreadArchive: true,
   showDiagnosticEvents: false,
   keepHistoryAfterContextClear: false,
@@ -67,6 +76,7 @@ export const defaultAppSettings: AppSettings = {
   allowFastServiceTier: true,
   telemetryEnabled: true,
   managedBranchPrefix: DEFAULT_MANAGED_BRANCH_PREFIX,
+  idleProviderSessionTimeoutMinutes: 30,
   machineServerUrl: null,
   defaultMachineAccess: null,
   machineGitCredentialsEnabled: true,
@@ -78,10 +88,12 @@ export const disabledProviderIdsSchema = z.array(z.string().min(1));
 
 export const appSettingsUpdateSchema = z.union([
   appSettingsSchema.extend({
+    idleProviderSessionTimeoutMinutes:
+      idleProviderSessionTimeoutMinutesSchema.optional(),
+    terminalCopyOnSelect: z.boolean().optional(),
     allowFastServiceTier: z.boolean().optional(),
     telemetryEnabled: z.boolean().optional(),
     confirmThreadArchive: z.boolean().optional(),
-    showGitChanges: z.boolean().optional(),
     keepHistoryAfterContextClear: z.boolean().optional(),
     summarizeShellCommands: z.boolean().optional(),
     showUnhandledProviderEvents: z.boolean().optional(),
@@ -89,10 +101,12 @@ export const appSettingsUpdateSchema = z.union([
     earlyAdopter: z.boolean().optional(),
   }),
   appSettingsSchema.omit({ showDiagnosticEvents: true }).extend({
+    idleProviderSessionTimeoutMinutes:
+      idleProviderSessionTimeoutMinutesSchema.optional(),
+    terminalCopyOnSelect: z.boolean().optional(),
     allowFastServiceTier: z.boolean().optional(),
     telemetryEnabled: z.boolean().optional(),
     confirmThreadArchive: z.boolean().optional(),
-    showGitChanges: z.boolean().optional(),
     keepHistoryAfterContextClear: z.boolean().optional(),
     summarizeShellCommands: z.boolean().optional(),
     showUnhandledProviderEvents: z.boolean(),

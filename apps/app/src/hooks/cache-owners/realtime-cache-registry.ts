@@ -10,13 +10,11 @@ import type {
   ThreadWithRuntime,
 } from "@bb/domain";
 import {
-  getCachedEnvironmentRefWorkspaceStateInvalidationQueryKeys,
   getCachedGlobalThreadListInvalidationQueryKeys,
   getCachedProjectThreadListInvalidationQueryKeys,
   getCachedSidebarNavigationThreads,
   getCachedThreadListPlaceholder,
   getCachedThreadListQueryKeys,
-  getEnvironmentBranchListInvalidationQueryKeys,
   getEnvironmentRecordInvalidationQueryKeys,
   getEnvironmentWorkspaceStateInvalidationQueryKeys,
   getFetchingThreadListQueryKeys,
@@ -25,7 +23,6 @@ import {
   updateCachedThreadListStatusState,
   updateCachedThreadStatusState,
 } from "./query-cache";
-import { bumpDiffPatchFreshnessGeneration } from "./environment-diff-patch-cache-owner";
 import { invalidateSystemExecutionOptions } from "./system-cache-effects";
 import { markThreadTimelineUnseenEvents } from "./thread-timeline-unseen-events";
 import {
@@ -51,10 +48,7 @@ import {
   allSystemThemesQueryKeyPrefix,
   allThreadQueryKeyPrefix,
   allTerminalsQueryKeyPrefix,
-  environmentDiffFilesQueryKeyPrefix,
   environmentFilePreviewQueryKeyPrefix,
-  environmentPullRequestQueryKey,
-  environmentWorkStatusQueryKeyPrefix,
   hostsQueryKey,
   serverMoveStatusQueryKey,
   systemAppUpdateQueryKey,
@@ -137,8 +131,6 @@ interface ThrottledActiveRefetchArgs {
   queryClient: QueryClient;
   queryKey: QueryKey;
 }
-
-const WORK_STATUS_REFETCH_MIN_INTERVAL_MS = 1_000;
 
 const THREAD_LIST_STATUS_FALLBACK_REFETCH_MIN_INTERVAL_MS = 1_000;
 
@@ -283,20 +275,28 @@ function cancelTrailingActiveRefetch({
   }
 }
 
+function invalidateQueryKeyWithoutCancelingActiveFetch({
+  exact,
+  queryClient,
+  queryKey,
+}: ScheduleTrailingActiveRefetchArgs): void {
+  const hadActiveFetch = hasActiveFetchingQueries(queryClient, queryKey, exact);
+  queryClient.invalidateQueries({ exact, queryKey }, { cancelRefetch: false });
+  if (hadActiveFetch) {
+    scheduleTrailingActiveRefetch({ exact, queryClient, queryKey });
+  }
+}
+
 function invalidateQueryKeysWithoutCancelingActiveFetches({
   queryClient,
   queryKeys,
 }: TimelineInvalidationQueryKeysArgs): void {
   for (const queryKey of queryKeys) {
-    const hadActiveFetch = hasActiveFetchingQueries(
+    invalidateQueryKeyWithoutCancelingActiveFetch({
+      exact: false,
       queryClient,
       queryKey,
-      false,
-    );
-    queryClient.invalidateQueries({ queryKey }, { cancelRefetch: false });
-    if (hadActiveFetch) {
-      scheduleTrailingActiveRefetch({ exact: false, queryClient, queryKey });
-    }
+    });
   }
 }
 
@@ -309,6 +309,13 @@ function invalidateTerminalTimelineQueryKeys({
     void queryClient.cancelQueries({ queryKey });
     queryClient.invalidateQueries({ queryKey });
   }
+}
+
+export function invalidateSidebarNavigation(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries(
+    { exact: true, queryKey: sidebarNavigationQueryKey() },
+    { cancelRefetch: false },
+  );
 }
 
 export function disposeTrailingActiveRefetches(queryClient: QueryClient): void {
@@ -357,7 +364,6 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
       dirtyThreadDetailQueriesForBackgroundActivity,
       dirtyThreadSearchQueriesForCompletedTurn,
       dirtyThreadTimelineQueriesForAppendedEvents,
-      dirtyThreadPullRequestQueryForCompletedTurn,
       dirtyThreadTurnRequestQueries,
     ],
   },
@@ -445,21 +451,18 @@ export const REALTIME_ENVIRONMENT_CHANGE_REGISTRY = {
     dirty: [
       dirtyEnvironmentRecordQueries,
       dirtyEnvironmentWorkspaceStateQueries,
-      dirtyEnvironmentBranchListQueries,
     ],
   },
   "environment-deleted": {
     dirty: [
       dirtyEnvironmentRecordQueries,
       dirtyEnvironmentWorkspaceStateQueries,
-      dirtyEnvironmentBranchListQueries,
     ],
   },
   "metadata-changed": {
     dirty: [
       dirtyEnvironmentRecordQueries,
       dirtyEnvironmentWorkspaceStateQueries,
-      dirtyEnvironmentBranchListQueries,
       dirtyEnvironmentThreadListQueries,
       dirtyThreadSearchQueries,
     ],
@@ -468,20 +471,19 @@ export const REALTIME_ENVIRONMENT_CHANGE_REGISTRY = {
     dirty: [
       dirtyEnvironmentRecordQueries,
       dirtyEnvironmentWorkspaceStateQueries,
-      dirtyEnvironmentBranchListQueries,
     ],
   },
   "work-status-changed": {
     dirty: [dirtyEnvironmentLiveWorkspaceStateQueries],
   },
   "git-refs-changed": {
-    dirty: [
-      dirtyEnvironmentRefDerivedWorkspaceStateQueries,
-      dirtyEnvironmentBranchListQueries,
-    ],
+    dirty: [],
   },
   "thread-storage-changed": {
     dirty: [dirtyThreadStorageQueriesForEnvironment],
+  },
+  "diff-viewed-changed": {
+    dirty: [],
   },
 } satisfies EnvironmentChangeRegistry;
 
@@ -529,6 +531,9 @@ export const REALTIME_HOST_CHANGE_REGISTRY = {
   "provider-model-catalog-changed": {
     dirty: [dirtyHostSystemExecutionOptionQueries],
   },
+  "provider-commands-changed": {
+    dirty: [dirtyProjectCommandCatalogQueries],
+  },
 } satisfies HostChangeRegistry;
 
 export const REALTIME_SYSTEM_CHANGE_REGISTRY = {
@@ -565,7 +570,7 @@ export const REALTIME_SYSTEM_CHANGE_REGISTRY = {
     dirty: [dirtyEnvironmentProviderQueries],
   },
   "ui-preferences-changed": {
-    dirty: [dirtyUiPreferencesQueries],
+    dirty: [() => [uiPreferencesQueryKey()]],
   },
   "server-move-changed": {
     dirty: [dirtyServerMoveStatusQueries],
@@ -677,9 +682,10 @@ export function executeRealtimeDirtyHandlers<
     if (!queryKeys) {
       continue;
     }
-    for (const queryKey of queryKeys) {
-      context.queryClient.invalidateQueries({ queryKey });
-    }
+    invalidateQueryKeysWithoutCancelingActiveFetches({
+      queryClient: context.queryClient,
+      queryKeys,
+    });
   }
 }
 
@@ -747,7 +753,11 @@ function dirtyThreadListQueries({
     for (const queryKey of getCachedGlobalThreadListInvalidationQueryKeys({
       queryClient,
     })) {
-      queryClient.invalidateQueries({ exact: true, queryKey });
+      invalidateQueryKeyWithoutCancelingActiveFetch({
+        exact: true,
+        queryClient,
+        queryKey,
+      });
     }
   }
   return getThreadListInvalidationQueryKeys({ projectId, queryClient });
@@ -767,12 +777,18 @@ function dirtyActiveThreadListQueries({
       ]
     : getCachedThreadListQueryKeys(queryClient);
   for (const queryKey of listQueryKeys) {
-    queryClient.invalidateQueries({
+    if (isArchivedThreadListQueryKey(queryKey)) {
+      queryClient.invalidateQueries({
+        exact: true,
+        queryKey,
+        refetchType: "none",
+      });
+      continue;
+    }
+    invalidateQueryKeyWithoutCancelingActiveFetch({
       exact: true,
+      queryClient,
       queryKey,
-      ...(isArchivedThreadListQueryKey(queryKey)
-        ? { refetchType: "none" }
-        : {}),
     });
   }
   return [sidebarNavigationQueryKey(), threadSearchQueryKeyPrefix()];
@@ -967,22 +983,20 @@ function dirtyThreadTurnRequestQueries({
   ];
 }
 
-function dirtyThreadPullRequestQueryForCompletedTurn({
-  eventTypes,
+export function getCachedThreadEnvironmentId({
   queryClient,
   threadId,
-}: ThreadRealtimeDirtyContext): QueryKey[] {
-  if (!threadId || !eventTypes?.includes("turn/completed")) {
-    return [];
-  }
+}: {
+  queryClient: QueryClient;
+  threadId: string;
+}): string | null {
   const cachedThread =
     queryClient.getQueryData<ThreadWithRuntime>(threadQueryKey(threadId)) ??
     getCachedThreadListPlaceholder(queryClient, threadId) ??
     getCachedSidebarNavigationThreads(queryClient).find(
       (thread) => thread.id === threadId,
     );
-  const environmentId = cachedThread?.environmentId;
-  return environmentId ? [environmentPullRequestQueryKey(environmentId)] : [];
+  return cachedThread?.environmentId ?? null;
 }
 
 function dirtyThreadTerminalQueries({
@@ -1060,7 +1074,11 @@ function refreshThreadListStatusState(
     return;
   }
   for (const queryKey of getFetchingThreadListQueryKeys(queryClient)) {
-    queryClient.invalidateQueries({ exact: true, queryKey });
+    invalidateQueryKeyWithoutCancelingActiveFetch({
+      exact: true,
+      queryClient,
+      queryKey,
+    });
   }
   if (flushOnce("thread-search:status-changed")) {
     invalidateQueryKeysWithoutCancelingActiveFetches({
@@ -1079,7 +1097,6 @@ function dirtyEnvironmentRecordQueries(
 function dirtyEnvironmentWorkspaceStateQueries(
   context: EnvironmentRealtimeDirtyContext,
 ): void {
-  bumpDiffPatchFreshnessGeneration(context.environmentId);
   for (const queryKey of getEnvironmentWorkspaceStateInvalidationQueryKeys(
     context,
   )) {
@@ -1091,38 +1108,9 @@ function dirtyEnvironmentLiveWorkspaceStateQueries({
   environmentId,
   queryClient,
 }: EnvironmentRealtimeDirtyContext): void {
-  bumpDiffPatchFreshnessGeneration(environmentId);
-  invalidateQueryKeyWithThrottledActiveRefetch({
-    exact: false,
-    minIntervalMs: WORK_STATUS_REFETCH_MIN_INTERVAL_MS,
-    queryClient,
-    queryKey: environmentWorkStatusQueryKeyPrefix(environmentId),
-  });
   queryClient.invalidateQueries({
     queryKey: environmentFilePreviewQueryKeyPrefix(environmentId),
   });
-  queryClient.invalidateQueries({
-    queryKey: environmentDiffFilesQueryKeyPrefix(environmentId),
-  });
-}
-
-function dirtyEnvironmentRefDerivedWorkspaceStateQueries({
-  environmentId,
-  queryClient,
-}: EnvironmentRealtimeDirtyContext): void {
-  bumpDiffPatchFreshnessGeneration(environmentId);
-  for (const queryKey of getCachedEnvironmentRefWorkspaceStateInvalidationQueryKeys(
-    queryClient,
-    { environmentId },
-  )) {
-    queryClient.invalidateQueries({ queryKey });
-  }
-}
-
-function dirtyEnvironmentBranchListQueries(
-  context: EnvironmentRealtimeDirtyContext,
-): QueryKey[] {
-  return getEnvironmentBranchListInvalidationQueryKeys(context);
 }
 
 function dirtyEnvironmentThreadListQueries({
@@ -1194,15 +1182,6 @@ function dirtyMachineEnvironmentQueries({
   invalidateQueryKeysWithoutCancelingActiveFetches({
     queryClient,
     queryKeys: [allMachineEnvironmentQueryKeyPrefix()],
-  });
-}
-
-function dirtyUiPreferencesQueries({
-  queryClient,
-}: RealtimeDirtyContext): void {
-  invalidateQueryKeysWithoutCancelingActiveFetches({
-    queryClient,
-    queryKeys: [uiPreferencesQueryKey()],
   });
 }
 

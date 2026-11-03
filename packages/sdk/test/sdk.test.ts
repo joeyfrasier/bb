@@ -1185,30 +1185,6 @@ describe("@bb/sdk", () => {
     );
   });
 
-  it("routes environment pull request calls through the HTTP transport", async () => {
-    const response = { outcome: "absent" };
-    const queue = createFetchQueue([{ body: response }]);
-    const sdk = createBbSdk({
-      transport: createHttpTransport({
-        baseUrl: "http://bb.test",
-        fetch: queue.fetch,
-        runtime: "node",
-      }),
-    });
-
-    await expect(
-      sdk.environments.pullRequest({ environmentId: "env_pr" }),
-    ).resolves.toEqual(response);
-
-    expect(queue.requests).toEqual([
-      {
-        bodyText: undefined,
-        method: "GET",
-        url: "http://bb.test/api/v1/environments/env_pr/pull-request",
-      },
-    ]);
-  });
-
   it("updates environment metadata through the HTTP transport", async () => {
     const environment = makeEnvironment({
       id: "env_update",
@@ -1394,6 +1370,7 @@ describe("@bb/sdk", () => {
       input: [{ type: "text", text: "Accept edits", mentions: [] }],
       mode: "start",
       permissionMode: "accept-edits",
+      originPluginId: "automations",
       pluginSubmission: {
         pluginId: "example-plugin",
         data: { action: "hold" },
@@ -1411,6 +1388,7 @@ describe("@bb/sdk", () => {
       expect.objectContaining({ permissionMode: "auto" }),
       expect.objectContaining({
         permissionMode: "accept-edits",
+        originPluginId: "automations",
         pluginSubmission: {
           pluginId: "example-plugin",
           data: { action: "hold" },
@@ -1867,8 +1845,8 @@ describe("@bb/sdk", () => {
     const checked = {
       id: "notes",
       outcome: "update-available" as const,
-      installed: { version: "1.2.0", display: "1.2.0" },
-      candidate: { version: "1.3.0", display: "1.3.0" },
+      installed: { version: "1.2.0", label: "1.2.0", display: "1.2.0" },
+      candidate: { version: "1.3.0", label: "1.3.0", display: "1.3.0" },
     };
     const queue = createFetchQueue([
       { body: { plugins: [plugin] } },

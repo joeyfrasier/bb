@@ -389,6 +389,10 @@ function fileEditPartialChanges(
   return "changes" in partial ? partial.changes : undefined;
 }
 
+function fileEditPartialStderr(partial: FileEditPartial): string | undefined {
+  return "stderr" in partial ? partial.stderr : undefined;
+}
+
 function fileEditPartialHasAppendedStdout(partial: FileEditPartial): boolean {
   return "appendStdout" in partial;
 }
@@ -470,6 +474,7 @@ function createFileEditMessage({
     callId,
     changes: change ? [{ ...change }] : [],
     stdout,
+    stderr: fileEditPartialStderr(partial),
     approvalStatus: fileEditPartialApprovalStatus(partial) ?? null,
     status: partial.status,
   };
@@ -638,6 +643,23 @@ function replaceFileEditMessagesForCall(
   callId: string,
   nextRows: readonly EventProjectionFileEditMessage[],
 ): void {
+  const previousRows = state.fileEditsByCallId.get(callId);
+  if (!previousRows || previousRows.length === 0) {
+    state.messages.push(...nextRows);
+    return;
+  }
+  const firstPreviousRow = previousRows[0];
+  if (
+    firstPreviousRow &&
+    previousRows.length === nextRows.length &&
+    previousRows.every(
+      (row, index) =>
+        row === nextRows[index] &&
+        haveCompatibleEventProjectionMessageScope(row, firstPreviousRow),
+    )
+  ) {
+    return;
+  }
   const insertionIndex = state.messages.findIndex(
     (message) => message.kind === "file-edit" && message.callId === callId,
   );
@@ -680,6 +702,7 @@ function updateFileEditMessage(
   }
 
   existing.stdout = stdout;
+  existing.stderr = fileEditPartialStderr(partial) ?? existing.stderr;
 
   existing.approvalStatus = applyApprovalStatusDelta(
     existing.approvalStatus,

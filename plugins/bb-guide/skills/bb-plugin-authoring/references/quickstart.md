@@ -56,10 +56,10 @@ the current engine values and the entries for its generated surfaces.
   source of the plugin id. distribution.md covers how the store uses
   `bb.description`. To label a plugin's status, end `bb.name` (or a
   marketplace `displayName`) with one short bracketed tag, such as
-  `Account Pooler [Experimental]` or `ACP providers [New adapter]`. Plugin
+  `Account Pooler [Experimental]` or `Memory [Early access]`. Plugin
   cards and details show the bracketed text as a tag beside the name: gray by
   default, and colored for reserved tags (`[Experimental]`). Write the tag in
-  sentence case (`[New adapter]`, not `[New Adapter]`), keep it to 24
+  sentence case (`[Early access]`, not `[Early Access]`), keep it to 24
   characters or fewer, and use brackets, not parentheses; longer or other
   suffixes stay part of the name. Older bb versions show the full name as text.
 - `bb.branding` (required) — declare `bb.branding.icon` as either the plugin's
@@ -158,6 +158,9 @@ namespaces routes, storage, settings, and CLI commands.
   `pluginId`, `pluginVersion`, and `builtWith: { bbVersion, pluginSdkVersion }`.
   Managed installs reject artifacts whose `pluginId`/`pluginVersion` disagree
   with the package manifest, or whose SDK major does not match the host.
+  `app.meta.json` also lists `runtimeSlots`, the shimmed host modules the
+  bundle imports. bb downloads `@pierre/diffs` only before evaluating a bundle
+  that lists it; a bundle built without the field gets every slot.
 - Runtime imports that bb does not shim belong in `dependencies`; validator
   imports such as Zod are ordinary runtime dependencies that the build
   bundles. `devDependencies` is for types and tooling only. A build-required

@@ -1,12 +1,22 @@
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
-import { CONTEXT_CARD_CLASS } from "./chrome-style-tokens";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import {
+  CONTEXT_CARD_CLASS,
+  CONTEXT_CARD_SEGMENT_CLASS,
+  CONTEXT_CARD_TOGGLE_CLASS,
+} from "./chrome-style-tokens";
 import { Icon } from "./icon";
 import { cn } from "../../lib/utils";
 
 const COLLAPSE_ROW_CLASS =
   "flex min-h-6 w-full cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground";
 
-const COUNT_PILL_CLASS =
+export const PROMPT_STACK_COUNT_PILL_CLASS =
   "inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-surface-recessed px-1 text-2xs leading-none tabular-nums text-subtle-foreground";
 
 const PEEK_LAYER_CLASSES: Record<number, readonly string[]> = {
@@ -99,8 +109,8 @@ export function PromptStackPeekLayers({
 
 export const PROMPT_STACK_DISCLOSURE_TRIGGER_CLASS = "group/disclosure";
 
-const TRAILING_SLOT_CLASS =
-  "-mr-3 ml-auto flex w-8 shrink-0 items-center justify-center";
+export const PROMPT_STACK_TRAILING_SLOT_CLASS =
+  "ml-auto mr-px flex w-6 shrink-0 items-center justify-center";
 const HOVER_CHEVRON_CLASS =
   "size-3.5 shrink-0 text-subtle-foreground opacity-0 transition-opacity group-hover/disclosure:opacity-100 group-focus-visible/disclosure:opacity-100 [@media(hover:none)]:hidden";
 
@@ -110,7 +120,7 @@ export function PromptStackHoverChevron({
   isExpanded: boolean;
 }) {
   return (
-    <span className={TRAILING_SLOT_CLASS}>
+    <span className={PROMPT_STACK_TRAILING_SLOT_CLASS}>
       {isExpanded ? null : (
         <Icon
           name="ChevronDown"
@@ -124,7 +134,7 @@ export function PromptStackHoverChevron({
 
 export function PromptStackChevron({ isExpanded }: { isExpanded: boolean }) {
   return (
-    <span className={TRAILING_SLOT_CLASS}>
+    <span className={PROMPT_STACK_TRAILING_SLOT_CLASS}>
       {isExpanded ? null : (
         <Icon
           name="ChevronDown"
@@ -144,8 +154,152 @@ export function PromptStackCountSlot({
   prefix?: "+" | "";
 }) {
   return (
-    <span className={TRAILING_SLOT_CLASS}>
-      <span className={COUNT_PILL_CLASS}>{`${prefix}${count}`}</span>
+    <span className={PROMPT_STACK_TRAILING_SLOT_CLASS}>
+      <span
+        className={PROMPT_STACK_COUNT_PILL_CLASS}
+      >{`${prefix}${count}`}</span>
     </span>
+  );
+}
+
+const SEGMENT_SHRINK_CLASS = "min-w-0 overflow-hidden";
+
+interface SectionToggleButtonProps {
+  buttonRef: RefObject<HTMLButtonElement | null>;
+  fillRow: boolean;
+  id: string;
+  controlsId: string;
+  ariaLabel?: string;
+  icon: ReactNode;
+  label: ReactNode;
+  compactLabel?: ReactNode;
+  hideLabelInCompact?: boolean;
+  isExpanded: boolean;
+  onToggle: () => void;
+}
+
+export function SectionToggleButton({
+  buttonRef,
+  fillRow,
+  id,
+  controlsId,
+  ariaLabel,
+  icon,
+  label,
+  compactLabel,
+  hideLabelInCompact = true,
+  isExpanded,
+  onToggle,
+}: SectionToggleButtonProps) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      id={id}
+      aria-expanded={isExpanded}
+      aria-controls={controlsId}
+      aria-label={ariaLabel}
+      onClick={onToggle}
+      className={cn(
+        CONTEXT_CARD_TOGGLE_CLASS,
+        CONTEXT_CARD_SEGMENT_CLASS,
+        SEGMENT_SHRINK_CLASS,
+        label !== null && label !== undefined ? "gap-1.5" : "gap-0",
+        fillRow && "flex-1 justify-start text-left",
+        PROMPT_STACK_DISCLOSURE_TRIGGER_CLASS,
+        isExpanded ? "text-foreground" : "text-muted-foreground",
+      )}
+    >
+      {icon}
+      {label !== null && label !== undefined ? (
+        <span
+          className="min-w-0 truncate"
+          data-promptbox-hide-compact={hideLabelInCompact ? "" : undefined}
+        >
+          {label}
+        </span>
+      ) : null}
+      {hideLabelInCompact &&
+      compactLabel !== null &&
+      compactLabel !== undefined ? (
+        <span className="min-w-0 truncate" data-promptbox-compact-label="">
+          {compactLabel}
+        </span>
+      ) : null}
+      {fillRow ? <PromptStackHoverChevron isExpanded={isExpanded} /> : null}
+    </button>
+  );
+}
+
+interface AnimatedBodyProps {
+  id: string;
+  labelledBy: string;
+  isExpanded: boolean;
+  collapsedBorder: "reserve" | "none";
+  children: ReactNode;
+}
+
+export function AnimatedBody({
+  id,
+  labelledBy,
+  isExpanded,
+  collapsedBorder,
+  children,
+}: AnimatedBodyProps) {
+  const [hasRealizedBody, setHasRealizedBody] = useState(isExpanded);
+  if (isExpanded && !hasRealizedBody) {
+    setHasRealizedBody(true);
+  }
+  const isBodyRealized = hasRealizedBody || isExpanded;
+
+  return (
+    <section
+      id={id}
+      role="region"
+      aria-labelledby={labelledBy}
+      aria-hidden={!isExpanded}
+      inert={!isExpanded}
+      className={cn(
+        "grid overflow-hidden transition-[grid-template-rows,opacity,border-color] duration-200 ease-out",
+        isExpanded
+          ? "grid-rows-[1fr] border-t border-border opacity-100"
+          : cn(
+              "pointer-events-none grid-rows-[0fr] opacity-0",
+              collapsedBorder === "reserve" && "border-t border-transparent",
+            ),
+      )}
+    >
+      <div className="overflow-hidden bg-popover">
+        {isBodyRealized ? children : null}
+      </div>
+    </section>
+  );
+}
+
+interface AnimatedDisclosureBodyProps extends AnimatedBodyProps {
+  collapseLabel: string;
+  collapseRef: RefObject<HTMLButtonElement | null>;
+  onCollapse: () => void;
+}
+
+export function AnimatedDisclosureBody({
+  collapseLabel,
+  collapseRef,
+  onCollapse,
+  children,
+  ...bodyProps
+}: AnimatedDisclosureBodyProps) {
+  return (
+    <AnimatedBody {...bodyProps}>
+      {children}
+      <div className="px-1 pb-1">
+        <PromptStackCollapseRow
+          buttonRef={collapseRef}
+          controlsId={bodyProps.id}
+          label={collapseLabel}
+          onCollapse={onCollapse}
+        />
+      </div>
+    </AnimatedBody>
   );
 }

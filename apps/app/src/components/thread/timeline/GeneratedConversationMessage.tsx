@@ -21,7 +21,7 @@ import { AUTOMATION_DETAIL_ROUTE_PATH } from "@/lib/route-paths";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
 import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-message-link-routing";
 import { cn } from "@bb/shared-ui/lib/utils";
-import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
+import type { PromptMentionLinkResolver } from "@bb/client-core";
 import {
   ConversationAttachments,
   type ConversationAttachmentItems,
@@ -40,7 +40,7 @@ import type {
 } from "./types.js";
 import { turnRequestLabel } from "@bb/client-core";
 import { TurnRequestLabel } from "./TurnRequestLabel.js";
-import { formatShortMessageTime } from "./MessageActionBar.js";
+import { formatShortMessageTime, MessageTime } from "./message-time.js";
 import { useOverflowMeasurement } from "./conversation-message-overflow.js";
 import { PromptMentionPill } from "./ConversationMessageMentions.js";
 import { useThreadTitleDisplayText } from "@/components/thread/ThreadTitleMentions.js";
@@ -259,6 +259,10 @@ function systemMessageTitleSegments(
             verbSegment("result"),
           ]
         : SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
+    case "environment-directory-updated":
+      return subject !== null && subject.kind === "directory"
+        ? [verbSegment("Continued in"), subjectSegment(subject.path, null)]
+        : SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
     case "unlabeled":
       return SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
   }
@@ -347,6 +351,8 @@ function systemMessageIconName(systemMessageKind: SystemMessageKind): IconName {
       return "ListTodo";
     case "tool-result-delivered":
       return "Toolbox";
+    case "environment-directory-updated":
+      return "FolderOpen";
     case "unlabeled":
       return "Info";
   }
@@ -440,7 +446,6 @@ function GeneratedAutomationTitle({
   requestLabel,
   timestamp,
 }: GeneratedAutomationTitleProps) {
-  const sentAt = new Date(timestamp);
   return (
     <span className="inline-flex min-w-0 max-w-full items-center gap-1 whitespace-nowrap text-sm leading-5">
       {automationLink === null ? (
@@ -458,16 +463,11 @@ function GeneratedAutomationTitle({
       <span aria-hidden="true" className="shrink-0 text-subtle-foreground">
         ·
       </span>
-      <time
+      <MessageTime
+        timestamp={timestamp}
+        label={formatShortMessageTime(timestamp, new Date())}
         className="shrink-0 text-subtle-foreground"
-        dateTime={sentAt.toISOString()}
-        title={sentAt.toLocaleString(undefined, {
-          dateStyle: "full",
-          timeStyle: "long",
-        })}
-      >
-        {formatShortMessageTime(timestamp, new Date())}
-      </time>
+      />
       {requestLabel === null ? null : (
         <span className="shrink-0">{requestLabel}</span>
       )}
@@ -484,7 +484,8 @@ function systemMessageIsTitleOnly(
   }
   return (
     systemMessageKind === "ownership-assigned" ||
-    systemMessageKind === "ownership-removed"
+    systemMessageKind === "ownership-removed" ||
+    systemMessageKind === "environment-directory-updated"
   );
 }
 
@@ -603,6 +604,7 @@ export const GeneratedConversationMessage = memo(
       [],
     );
     const collapsedPreviewOverflowMeasurement = useOverflowMeasurement({
+      axis: "horizontal",
       elementRef: collapsedPreviewTextRef,
       enabled: !titleOnly && messageText.length > 0,
       measurementKey: messageText,

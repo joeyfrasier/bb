@@ -53,7 +53,10 @@ import {
   requirePublicProject,
   requirePublicStandardProject,
 } from "../services/lib/entity-lookup.js";
-import { isWindowsHostPath, PROMPT_HISTORY_ENTRY_LIMIT } from "@bb/domain";
+import {
+  isWindowsHostPath,
+  PROMPT_HISTORY_ENTRY_LIMIT,
+} from "@bb/domain";
 import { toThreadListEntryResponses } from "../services/threads/thread-runtime-display.js";
 import { callHostRetryableOnlineRpc } from "../services/hosts/online-rpc.js";
 import {
@@ -100,6 +103,7 @@ import {
   scanProviderNativeRoots,
 } from "../services/providers/native-roots.js";
 import { assertUsableHostId } from "../services/hosts/primary-host.js";
+import { listProviderLiveCommands } from "../services/providers/provider-live-commands.js";
 import {
   resolveProjectCommandWorkspace,
   resolveProjectWorkspaceTarget,
@@ -683,6 +687,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       timeoutMs: COMMAND_TIMEOUT_MS,
       command: {
         type: "host.list_files",
+        followRootSymlink: false,
         path: target.path,
         ...(query.query ? { query: query.query } : {}),
         limit,
@@ -769,17 +774,23 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
             workspacePath: workspace.cwd,
             includeAgentInstructions: false,
           });
-    const [result, workspaceSkills] = await Promise.all([
+    const [result, liveCommands, workspaceSkills] = await Promise.all([
       listProviderCommands(),
+      listProviderLiveCommands(deps, {
+        hostId: workspace.hostId,
+        providerId: query.provider,
+        cwd: workspace.cwd,
+      }),
       readWorkspaceSkills(),
     ]);
-    const skillCatalog = resolveSkillCatalog(deps, {
+    const skillCatalog = await resolveSkillCatalog(deps, {
       projectSkillSources: workspaceSkills.projectSkillSources,
       sharedSkillSources: workspaceSkills.sharedSkills.runtimeSources,
     });
     return context.json(
       buildCommandListResponse({
         commands: result.commands,
+        liveCommands,
         includeBuiltinCompact: deps.providerRegistry.supportsManualCompaction(
           query.provider,
         ),

@@ -30,10 +30,6 @@ import {
   readParentPool,
   type ParentPool,
 } from "./parent-pool.js";
-import type {
-  ImportedClaudeCredentials,
-  ImportedCodexCredentials,
-} from "./credentials.js";
 import { createHub } from "./hub.js";
 import { PoolOperations } from "./operations.js";
 import { accountPoolRpcContract, createRpcHandlers } from "./rpc.js";
@@ -64,8 +60,6 @@ export interface AccountPoolPluginOptions {
   drainTimeoutMs?: number;
   maxAffinityBindings?: number;
   disposeTimeoutMs?: number;
-  importCredentials?: () => Promise<ImportedClaudeCredentials>;
-  importCodexCredentials?: () => Promise<ImportedCodexCredentials>;
   oauthAuthorizeUrl?: string;
   oauthTokenUrl?: string;
   oauthProfileUrl?: string;
@@ -77,7 +71,11 @@ const DISPOSE_INSPECTION_TIMEOUT = Symbol("dispose-inspection-timeout");
 const HUB_BASE_PATH = "/api/v1/plugins/account-pool/http";
 
 const PROVIDER_ROUTING_ENV: Record<PoolProvider, readonly string[]> = {
-  claude: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"],
+  claude: [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+  ],
   codex: ["CODEX_OPENAI_BASE_URL", "CODEX_POOL_AUTH_TOKEN"],
 };
 
@@ -159,8 +157,6 @@ export function createAccountPoolPlugin(
       codexUsageUrl: options.codexUsageUrl,
       usageUrl: options.usageUrl,
       profileUrl: options.oauthProfileUrl,
-      importClaudeCredentials: options.importCredentials,
-      importCodexCredentials: options.importCodexCredentials,
       drainTimeoutMs: options.drainTimeoutMs,
       maxAffinityBindings: options.maxAffinityBindings,
       getParentRoute: proxyingParent,
@@ -225,13 +221,19 @@ export function createAccountPoolPlugin(
       authorizeUrl: options.oauthAuthorizeUrl,
       tokenUrl: options.oauthTokenUrl,
       profileUrl: options.oauthProfileUrl,
-      addAccount: (authenticated) => operations.addOAuth(authenticated),
+      validateTarget: (target) =>
+        operations.validateLoginTarget("claude", target),
+      saveLogin: (authenticated, target) =>
+        operations.addOAuth(authenticated, target),
     });
     const codexLogin = new CodexDeviceLogin({
       fetch: upstreamFetch,
       now,
       authBaseUrl: options.codexAuthBaseUrl,
-      addAccount: (authenticated) => operations.addCodexOAuth(authenticated),
+      validateTarget: (target) =>
+        operations.validateLoginTarget("codex", target),
+      saveLogin: (authenticated, target) =>
+        operations.addCodexOAuth(authenticated, target),
     });
     if ((await accounts.list()).every((account) => !account.enabled)) {
       bb.status.needsConfiguration(
@@ -311,17 +313,23 @@ export function createAccountPoolPlugin(
         provider: PoolProvider,
         serving: (token: string) => Promise<PoolEnvEntry[]>,
       ) =>
-      async (context: { threadId: string; hostId: string }) => {
-        const bypassed = await routing.isBypassed(context.threadId);
+      async (context: { threadId: string | null; hostId: string }) => {
+        const { threadId } = context;
+        const bypassed =
+          threadId !== null && (await routing.isBypassed(threadId));
         if (!bypassed && (await canServe(provider))) {
-          await bb.storage.kv.set(`retry-route:${context.threadId}`, provider);
           const token = await hubTokens.forHost(context.hostId);
-          if (provider === "claude") {
-            await routing.recordRouted(context.threadId, context.hostId);
+          if (threadId !== null) {
+            await bb.storage.kv.set(`retry-route:${threadId}`, provider);
+            if (provider === "claude") {
+              await routing.recordRouted(threadId, context.hostId);
+            }
           }
           return [...(await serving(token)), ...markerEntries(token)];
         }
-        await bb.storage.kv.delete(`retry-route:${context.threadId}`);
+        if (threadId !== null) {
+          await bb.storage.kv.delete(`retry-route:${threadId}`);
+        }
         return parentPool === null ? [] : neutralized(provider);
       };
     const subscriptionCacheEntries = async (): Promise<PoolEnvEntry[]> =>
@@ -358,6 +366,12 @@ export function createAccountPoolPlugin(
           name: "ANTHROPIC_AUTH_TOKEN",
           value: token,
           reason: "Account Pooler hub token for this machine",
+        },
+        {
+          name: "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+          value: "1",
+          reason:
+            "Claude Code otherwise refreshes this machine's own Claude login while routed, which can spend its single-use refresh token and sign it out",
         },
         {
           name: "ENABLE_TOOL_SEARCH",

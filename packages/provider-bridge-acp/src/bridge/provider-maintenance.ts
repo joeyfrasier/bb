@@ -1,10 +1,9 @@
-import { execFile } from "node:child_process";
+import { execHostFile, execPortableFile } from "@bb/process-utils";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { promisify } from "node:util";
 import type {
   ProviderHealthResult,
   ProviderInstallationRunResult,
@@ -16,13 +15,13 @@ import type {
 import {
   clampPercent,
   downloadedInstallerCommand,
-  readCliVersion,
   resolveExecutablePath,
+  versionFrom,
 } from "@bb/provider-bridge-protocol/bridge-kit";
 import { z } from "zod";
 import { readOpenCodeGoUsage } from "./opencode-usage.js";
 
-const execFileAsync = promisify(execFile);
+const execFileAsync = execHostFile;
 const USAGE_FETCH_TIMEOUT_MS = 15_000;
 const CURSOR_DASHBOARD_URL =
   "https://api2.cursor.sh/aiserver.v1.DashboardService";
@@ -160,6 +159,27 @@ function healthResult(args: {
   };
 }
 
+async function readAcpCliVersion(command: string): Promise<string | null> {
+  try {
+    const { stdout, stderr } = await execPortableFile(command, ["--version"], {
+      cwd: process.cwd(),
+      env: process.env,
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000,
+    });
+    const output = `${stdout}\n${stderr}`;
+    return (
+      versionFrom(output) ??
+      output.match(
+        /(?:^|\s)(\d{4}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])-[0-9a-f]+)(?=\s|$)/u,
+      )?.[1] ??
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
 export async function getAcpProviderHealth(args: {
   maintenance: AcpMaintenanceDialect | undefined;
   command: string | null;
@@ -175,7 +195,7 @@ export async function getAcpProviderHealth(args: {
   if ((await resolveExecutablePath(args.command)) === null) {
     return healthResult({ maintenance, status: "not_installed" });
   }
-  const version = await readCliVersion(args.command);
+  const version = await readAcpCliVersion(args.command);
   if (maintenance === undefined) {
     return healthResult({
       maintenance,
@@ -211,7 +231,7 @@ export async function getAcpProviderInstallationStatus(args: {
   const installed = resolvedExecutable !== null;
   const currentVersion =
     installed && args.command !== null
-      ? await readCliVersion(args.command)
+      ? await readAcpCliVersion(args.command)
       : null;
   const installAction =
     args.maintenance !== undefined && !installed

@@ -51,6 +51,7 @@ import {
   startMachineResume,
   startMachineSuspension,
   startMachineReconciliation,
+  forceMachineRemoval,
   retryMachineCleanup,
   sweepProviderMachine,
 } from "../services/machines/provider-orchestration.js";
@@ -113,11 +114,12 @@ async function revokeConnectMachineCredential(
       throw new Error(`connect plugin revoke handler is ${handler.outcome}`);
     }
     const result = await plugins.invokeRpcHandler(
-      connectPlugin.id,
+      handler.owner,
       "revokeMachine",
       handler.value,
       { machineId },
       { kind: "client" },
+      null,
     );
     if (!result.ok) throw new Error(result.error.message);
   } catch (error) {
@@ -291,9 +293,13 @@ export function registerHostRoutes(
     return context.json({ ok: true as const });
   });
 
-  del(routes.delete, async (context) => {
+  del(routes.delete, async (context, query) => {
     assertHostManagementAllowed(context);
     const hostId = context.req.param("id");
+    if (query.force === "true") {
+      await forceMachineRemoval(deps, hostId);
+      return context.json({ ok: true as const });
+    }
     const host = requireMutableHost(deps, hostId);
     if (resolvePrimaryHostId(deps) === hostId) {
       throw new ApiError(
