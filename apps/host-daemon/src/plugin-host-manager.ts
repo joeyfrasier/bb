@@ -271,7 +271,16 @@ export class PluginHostManager {
         throw new Error("WORKSPACE_RETIREMENT_BUSY");
       const admission = new AbortController();
       this.pendingRetirements.set(key, admission);
-      const deadline = setTimeout(() => admission.abort(), command.timeoutMs);
+      const deadline = setTimeout(
+        () =>
+          this.cancel({
+            type: "plugin.host.cancel",
+            pluginId: command.pluginId,
+            generation: command.generation,
+            callId: command.callId,
+          }),
+        command.timeoutMs,
+      );
       deadline.unref();
       try {
         const dataDir = await ensurePluginProcessDataDir({
