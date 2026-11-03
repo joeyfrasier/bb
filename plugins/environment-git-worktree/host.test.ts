@@ -24,6 +24,10 @@ import {
   type TestContext,
 } from "vitest";
 import { createWorktreeHostEntry } from "./host.js";
+import {
+  findWorktreeEntry,
+  parseWorktreeListPorcelain,
+} from "./host/worktree-list.js";
 
 const execFileAsync = promisify(execFile);
 let repositoryTemplate: string;
@@ -675,8 +679,13 @@ describe.concurrent("worktree host entry", () => {
       );
       expect(existsSync(`${created.path}.completed`)).toBe(true);
       expect(
-        await git(sourcePath, "worktree", "list", "--porcelain"),
-      ).toContain(created.path);
+        findWorktreeEntry(
+          parseWorktreeListPorcelain(
+            await git(sourcePath, "worktree", "list", "--porcelain", "-z"),
+          ),
+          created.path,
+        ),
+      ).not.toBeNull();
       await harness.experimental_dispose();
     },
   );
@@ -697,6 +706,7 @@ describe.concurrent("worktree host entry", () => {
       }),
     );
     if (created.status !== "created") throw new Error(created.message);
+    const readmeBytes = await readFile(join(created.path, "README.md"));
     await rm(join(created.path, ".git"));
     const removed = await harness.experimental_call("remove", {
       operationId: "remove-unknown",
@@ -704,9 +714,7 @@ describe.concurrent("worktree host entry", () => {
       path: created.path,
     });
     expect(removed).toMatchObject({ status: "failed" });
-    expect(await readFile(join(created.path, "README.md"), "utf8")).toBe(
-      "hello\n",
-    );
+    expect(await readFile(join(created.path, "README.md"))).toEqual(readmeBytes);
     expect(existsSync(`${created.path}.completed`)).toBe(true);
     await harness.experimental_dispose();
   });
