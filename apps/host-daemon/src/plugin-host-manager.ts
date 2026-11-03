@@ -1,4 +1,8 @@
 import {
+  canonicalMutationPath,
+  workspaceMutationAdmission,
+} from "./workspace-mutation-admission.js";
+import {
   forkHostProcess as fork,
   createPluginProcessTempDir,
   ensurePluginProcessDataDir,
@@ -8,7 +12,7 @@ import { operationEnvironment } from "./operation-environment.js";
 import type { ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import path, { isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
@@ -114,7 +118,7 @@ interface PluginHostManagerOptions {
 
 const START_TIMEOUT_MS = 10_000;
 const CANCEL_GRACE_MS = 5_000;
-const HOST_WORKER_PROTOCOL_VERSION = 2;
+const HOST_WORKER_PROTOCOL_VERSION = 3;
 const DEFAULT_WORKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 const MAX_ACTIVE_CALLS_PER_PLUGIN = 256;
 const MAX_ACTIVE_CALL_INPUT_BYTES_PER_PLUGIN = 32 * 1024 * 1024;
@@ -236,10 +240,128 @@ export class PluginHostManager {
   private readonly retiredGenerations = new Map<string, Set<string>>();
   private readonly workerMutationTails = new Map<string, Promise<void>>();
   private shuttingDown = false;
+  private readonly pendingRetirements = new Map<string, AbortController>();
 
   constructor(private readonly options: PluginHostManagerOptions) {}
 
   async call(command: PluginHostCallCommand): Promise<PluginHostCallResult> {
+    if (
+      command.pluginId === "environment-git-worktree" &&
+      (command.method === "remove" || command.method === "create")
+    ) {
+      const value = command.input;
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        !("pathKey" in value) ||
+        typeof value.pathKey !== "string" ||
+        !("preservationVersion" in value) ||
+        value.preservationVersion !== 1 ||
+        !/^[A-Za-z0-9._-]+$/.test(value.pathKey) ||
+        value.pathKey === "." ||
+        value.pathKey === ".."
+      )
+        throw new Error("WORKSPACE_PATH_KEY_INVALID");
+      const dataDir = await ensurePluginProcessDataDir({
+        daemonDataDir: this.options.dataDir,
+        pluginId: command.pluginId,
+        kind: "host-data",
+      });
+      const attemptRoot = path.join(dataDir, "worktrees", value.pathKey);
+      const generation = value.pathKey;
+      const canonicalAttempt = await canonicalMutationPath(attemptRoot);
+      const canonicalManaged = await canonicalMutationPath(
+        path.join(dataDir, "worktrees"),
+      );
+      const ownedRelative = path.relative(canonicalManaged, canonicalAttempt);
+      if (
+        !ownedRelative ||
+        ownedRelative.startsWith("..") ||
+        path.isAbsolute(ownedRelative)
+      )
+        throw new Error("WORKSPACE_PATH_UNOWNED");
+      const root =
+        command.method === "remove" &&
+        "path" in value &&
+        typeof value.path === "string"
+          ? value.path
+          : attemptRoot;
+      if (
+        path.relative(attemptRoot, root).startsWith("..") ||
+        path.isAbsolute(path.relative(attemptRoot, root))
+      )
+        throw new Error("WORKSPACE_PATH_UNOWNED");
+      const canonicalRoot = await canonicalMutationPath(root);
+      const relative = path.relative(canonicalAttempt, canonicalRoot);
+      if (relative.startsWith("..") || path.isAbsolute(relative))
+        throw new Error("WORKSPACE_PATH_UNOWNED");
+      const key = this.callKey(command);
+      if (this.pendingRetirements.has(key))
+        throw new Error("WORKSPACE_RETIREMENT_BUSY");
+      const admission = new AbortController();
+      this.pendingRetirements.set(key, admission);
+      const deadline = setTimeout(() => admission.abort(), command.timeoutMs);
+      deadline.unref();
+      try {
+        return await workspaceMutationAdmission(this.options.dataDir).protect(
+          root,
+          value.pathKey,
+          command.method === "remove",
+          async (canonicalRoot) => {
+            const relative = path.relative(canonicalAttempt, canonicalRoot);
+            if (relative.startsWith("..") || path.isAbsolute(relative))
+              throw new Error("WORKSPACE_PATH_UNOWNED");
+            const result = await this.callWorker(command, {
+              version: 1,
+              root: canonicalRoot,
+              generation,
+            });
+            if (
+              command.method === "create" &&
+              (!result.output ||
+                typeof result.output !== "object" ||
+                Array.isArray(result.output) ||
+                !("status" in result.output) ||
+                result.output.status !== "created")
+            )
+              throw new Error("WORKSPACE_PROVISION_FAILED");
+            return result;
+          },
+          admission.signal,
+        );
+      } finally {
+        clearTimeout(deadline);
+        this.pendingRetirements.delete(key);
+      }
+    }
+    if (
+      command.pluginId === "environment-git-worktree" &&
+      command.method === "workspacePreservationStatus"
+    ) {
+      const value = command.input;
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        !("path" in value) ||
+        typeof value.path !== "string"
+      )
+        throw new Error("WORKSPACE_PATH_INVALID");
+      if (
+        !(await workspaceMutationAdmission(this.options.dataDir).available(
+          value.path,
+        ))
+      )
+        throw new Error("WORKSPACE_RETIRING");
+    }
+    return this.callWorker(command, null);
+  }
+
+  private async callWorker(
+    command: PluginHostCallCommand,
+    workspaceFence: { version: 1; root: string; generation: string } | null,
+  ): Promise<PluginHostCallResult> {
     if (this.shuttingDown) {
       throw new Error("host plugin manager is shutting down");
     }
@@ -297,6 +419,8 @@ export class PluginHostManager {
             callId: command.callId,
             method: command.method,
             input: command.input,
+            workspaceFence,
+            workspaceFenceVersion: 1,
             envVars: operationEnvironment(
               command.contributedEnv,
               this.options.shellEnv?.() ?? {},
@@ -328,8 +452,10 @@ export class PluginHostManager {
   }
 
   cancel(command: PluginHostCancelCommand): { cancelled: boolean } {
+    const admission = this.pendingRetirements.get(this.callKey(command));
+    admission?.abort();
     const callState = this.activeCalls.get(this.callKey(command));
-    if (callState === undefined) return { cancelled: false };
+    if (callState === undefined) return { cancelled: admission !== undefined };
     callState.cancelled = true;
     const worker = this.workers.get(command.pluginId);
     if (

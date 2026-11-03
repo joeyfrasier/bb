@@ -1,3 +1,5 @@
+import nodePath from "node:path";
+import { realpath } from "node:fs/promises";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { readdir } from "node:fs/promises";
 import { createHostProgress } from "bb-environment-provider-host/progress";
@@ -49,6 +51,33 @@ export function createWorktreeHostEntry() {
     contract: worktreeHostContract,
     experimental_signals: worktreeHostSignals,
     handlers: {
+      async workspacePreservationStatus(input, context) {
+        if (context.internal_DO_NOT_USE_workspaceFenceVersion !== 1)
+          return {
+            status: "unavailable",
+            reason: "NATIVE_WRITER_FENCE_UNAVAILABLE",
+          } as const;
+        const root = await realpath(input.path);
+        const managedRoot = await realpath(
+          resolveWorktreesRoot(context.experimental_paths.dataDir),
+        );
+        const relative = nodePath.relative(managedRoot, root);
+        if (
+          !relative ||
+          relative.startsWith("..") ||
+          nodePath.isAbsolute(relative) ||
+          relative.split(nodePath.sep)[0] !== input.pathKey
+        )
+          return {
+            status: "blocked",
+            reason: "UNSUPPORTED_ENVIRONMENT",
+          } as const;
+        return {
+          status: "protected",
+          canonicalRoot: root,
+          generation: input.pathKey,
+        } as const;
+      },
       async defaultBaseBranch(input) {
         const resolved = await resolveWorktreeBaseBranch(input.sourcePath, {
           kind: "default",
@@ -88,6 +117,13 @@ export function createWorktreeHostEntry() {
             input.baseBranch,
           );
           const created = await createWorktree({
+            chatProtection: {
+              storagePath: nodePath.join(
+                context.experimental_paths.dataDir,
+                "preserved-chat-data",
+              ),
+              fence: context.internal_DO_NOT_USE_workspaceFence ?? null,
+            },
             sourcePath: input.sourcePath,
             targetPath,
             completionPath: completionPathForWorktree(targetPath),
@@ -130,6 +166,13 @@ export function createWorktreeHostEntry() {
           for (const path of paths) {
             await removeWorktree({
               path,
+              chatProtection: {
+                storagePath: nodePath.join(
+                  context.experimental_paths.dataDir,
+                  "preserved-chat-data",
+                ),
+                fence: context.internal_DO_NOT_USE_workspaceFence ?? null,
+              },
               completionPath: completionPathForWorktree(path),
               onProgress: createHostProgress({
                 operationId: input.operationId,

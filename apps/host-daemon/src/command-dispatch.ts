@@ -1,3 +1,4 @@
+import { workspaceMutationAdmission } from "./workspace-mutation-admission.js";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { withVcsProcessPriority } from "@bb/process-utils";
@@ -576,9 +577,19 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
     listHostFiles(command, signal),
   "host.list_paths": (command, _options, signal) =>
     listHostPaths(command, signal),
-  "host.mkdir": mkdirHostPath,
-  "host.move_path": moveHostPath,
-  "host.remove_path": removeHostPath,
+  "host.mkdir": (command, options) =>
+    workspaceMutationAdmission(options.dataDir).mutate([command.path], () =>
+      mkdirHostPath(command),
+    ),
+  "host.move_path": (command, options) =>
+    workspaceMutationAdmission(options.dataDir).mutate(
+      [command.sourcePath, command.destinationPath],
+      () => moveHostPath(command),
+    ),
+  "host.remove_path": (command, options) =>
+    workspaceMutationAdmission(options.dataDir).mutate([command.path], () =>
+      removeHostPath(command),
+    ),
   "host.browse_directory": browseHostDirectory,
   "host.paths_exist": checkHostPathsExist,
   "project.inspect": async (command, options) =>
@@ -611,7 +622,10 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
   "host.list_branch_options": listHostBranchOptions,
   "host.read_file": readHostFile,
   "host.read_file_chunk": readHostFileChunk,
-  "host.write_file": writeHostFile,
+  "host.write_file": (command, options) =>
+    workspaceMutationAdmission(options.dataDir).mutate([command.path], () =>
+      writeHostFile(command),
+    ),
   "provider.list_models": (command, options) =>
     withResolvedBridgeLaunch(command, options, (args) =>
       options.listModels({

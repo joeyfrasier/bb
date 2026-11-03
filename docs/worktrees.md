@@ -220,3 +220,12 @@ Fresh machine clones do not apply `.worktreeinclude`, because the new host has
 no local source checkout; supply local files and secrets through Machine
 environment settings. Restoring a machine filesystem does not rerun
 `.bb-env-setup.sh`.
+
+Root `.bb` data has one narrow preservation path on supported native hosts.
+The daemon fences SDK file mutations and drains in-flight operations before the
+Worktree provider captures and reads back the complete tree in private storage
+outside managed worktrees. That verified capture can cover ignored `.bb` entries;
+other ignored files still require preservation. Missing native capability or a
+failed capture leaves the workspace intact. Retirement tombstones reject late
+SDK exports after removal and across daemon restart. This does not fence arbitrary
+external filesystem writers or establish off-host backup.

@@ -50,6 +50,35 @@ type WorktreeOperation = Pick<
 >;
 
 export const worktreeRpcContract = defineRpcContract({
+  experimental_workspacePreservationStatus: {
+    input: z.object({ environmentId: z.string().min(1) }).strict(),
+    output: z.discriminatedUnion("status", [
+      z
+        .object({
+          version: z.literal(1),
+          status: z.literal("protected"),
+          environmentId: z.string().min(1),
+          hostId: z.string().min(1),
+          canonicalRoot: z.string().min(1),
+          generation: z.string().min(1),
+        })
+        .strict(),
+      z
+        .object({
+          version: z.literal(1),
+          status: z.literal("unavailable"),
+          reason: z.literal("NATIVE_WRITER_FENCE_UNAVAILABLE"),
+        })
+        .strict(),
+      z
+        .object({
+          version: z.literal(1),
+          status: z.literal("blocked"),
+          reason: z.literal("UNSUPPORTED_ENVIRONMENT"),
+        })
+        .strict(),
+    ]),
+  },
   defaultBaseBranch: {
     input: z
       .object({
@@ -141,6 +170,7 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
       const result = await host.call(
         "create",
         {
+          preservationVersion: 1,
           operationId,
           sourcePath: context.projectCheckout.path,
           pathKey: context.pathKey,
@@ -222,6 +252,7 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
         const result = await host.call(
           "remove",
           {
+            preservationVersion: 1,
             operationId,
             pathKey: context.pathKey,
             path: context.path,
@@ -243,6 +274,47 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
   });
 
   bb.rpc.register(worktreeRpcContract, {
+    async experimental_workspacePreservationStatus({ environmentId }) {
+      const environment = await bb.sdk.environments.get({ environmentId });
+      if (
+        environment.environmentProviderId !==
+          GIT_WORKTREE_ENVIRONMENT_PROVIDER_ID ||
+        !environment.managed ||
+        !environment.path ||
+        !environment.hostId ||
+        !environment.environmentProviderInstanceKey ||
+        environment.lifecycle.phase !== "active"
+      )
+        return {
+          version: 1,
+          status: "blocked",
+          reason: "UNSUPPORTED_ENVIRONMENT",
+        } as const;
+      try {
+        const value = await host.call(
+          "workspacePreservationStatus",
+          {
+            path: environment.path,
+            pathKey: environment.environmentProviderInstanceKey,
+          },
+          { hostId: environment.hostId },
+        );
+        return value.status === "protected"
+          ? ({
+              version: 1,
+              ...value,
+              environmentId,
+              hostId: environment.hostId,
+            } as const)
+          : ({ version: 1, ...value } as const);
+      } catch {
+        return {
+          version: 1,
+          status: "unavailable",
+          reason: "NATIVE_WRITER_FENCE_UNAVAILABLE",
+        } as const;
+      }
+    },
     async defaultBaseBranch({ projectId, hostId }) {
       const project = await bb.sdk.projects.get({ projectId });
       const sources = project.sources.filter(

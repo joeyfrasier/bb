@@ -111,6 +111,14 @@ export type ExperimentalHostWatchListener = (
 export interface ExperimentalHostRpcContext<
   Signals extends ExperimentalHostSignals = {},
 > {
+  /** Native admission held around a first-party worktree lifecycle call. */
+  readonly internal_DO_NOT_USE_workspaceFence?: {
+    readonly version: 1;
+    readonly root: string;
+    readonly generation: string;
+  } | null;
+  /** Native daemon admission protocol supported by this worker. */
+  readonly internal_DO_NOT_USE_workspaceFenceVersion?: 1;
   /** Aborted when this request is cancelled or its worker is disposed. */
   readonly signal: AbortSignal;
   /** Aborted once for the lifetime of this worker process. */

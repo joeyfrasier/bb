@@ -39,6 +39,7 @@ const heldEnvironments = new Map();
 export default {
   experimental_apiVersion: 1,
   contract: {
+    remove: { input: anySchema, output: anySchema },
     environment: { input: anySchema, output: anySchema },
     releaseEnvironment: { input: anySchema, output: anySchema },
     secretProbe: { input: anySchema, output: anySchema },
@@ -55,6 +56,7 @@ export default {
   },
   experimental_signals: { changed: { payload: anySchema } },
   handlers: {
+    remove(input, context) { return {status:"removed",fence:context.internal_DO_NOT_USE_workspaceFence,version:context.internal_DO_NOT_USE_workspaceFenceVersion}; },
     async secretProbe(input, context) {
       const secret = process.env.TEST_SECRET ?? null;
       if (input.chunks) {
@@ -206,6 +208,70 @@ describe("PluginHostManager", () => {
     managers.push(manager);
     return { dataDir, manager };
   }
+
+  it("injects native admission independently of worker input", async () => {
+    const { dataDir, manager } = await createManagerFixture();
+    const root = join(
+      dataDir,
+      "plugins/environment-git-worktree/host-data/worktrees/synthetic/repo",
+    );
+    await fs.mkdir(root, { recursive: true });
+    const result = await manager.call(
+      callCommand({
+        pluginId: "environment-git-worktree",
+        method: "remove",
+        input: {
+          preservationVersion: 1,
+          pathKey: "synthetic",
+          path: root,
+          workspaceFence: { root: "/forged", generation: "forged" },
+        },
+      }),
+    );
+    expect(result.output).toEqual({
+      status: "removed",
+      version: 1,
+      fence: { version: 1, root, generation: "synthetic" },
+    });
+  });
+
+  it("refuses symlink descendants escaping the owned attempt root", async () => {
+    const { dataDir, manager } = await createManagerFixture();
+    const attempt = join(
+      dataDir,
+      "plugins/environment-git-worktree/host-data/worktrees/synthetic",
+    );
+    const outside = join(dataDir, "unowned");
+    await fs.mkdir(attempt, { recursive: true });
+    await fs.mkdir(outside);
+    await fs.symlink(outside, join(attempt, "alias"));
+    await expect(
+      manager.call(
+        callCommand({
+          pluginId: "environment-git-worktree",
+          method: "remove",
+          input: {
+            preservationVersion: 1,
+            pathKey: "synthetic",
+            path: join(attempt, "alias"),
+          },
+        }),
+      ),
+    ).rejects.toThrow("WORKSPACE_PATH_UNOWNED");
+  });
+
+  it("rejects old provider lifecycle calls without a preservation contract", async () => {
+    const manager = await createManager();
+    await expect(
+      manager.call(
+        callCommand({
+          pluginId: "environment-git-worktree",
+          method: "remove",
+          input: { pathKey: "synthetic", path: null },
+        }),
+      ),
+    ).rejects.toThrow("WORKSPACE_PATH_KEY_INVALID");
+  });
 
   it("verifies, caches, and reuses one worker for an artifact generation", async () => {
     const fetchArtifact = vi.fn(async () => artifactBody(artifactSource));

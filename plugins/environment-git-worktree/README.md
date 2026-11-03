@@ -26,3 +26,28 @@ it is only chosen when local is equal or behind. An explicit `origin/<name>`
 still fails, and `refs/remotes/origin/<name>` uses the last fetched ref without
 fetching. The resolved base is returned and stored with the environment; this does not
 refresh existing worktrees before later agent turns.
+
+## Preserve chat files during retirement
+
+Native host admission closes SDK file writes, directory creation, moves, and
+removals before worktree retirement. It drains admitted operations, and retains a
+private generation-bound tombstone through removal, cancellation, or worker death.
+The provider copies the complete root `.bb` tree to private `preserved-chat-data`
+storage outside its `worktrees` root and verifies file bytes before removal.
+Unsupported links, nested repositories, unreadable files, and changed captures
+block removal. Other ignored files still block removal.
+
+`experimental_workspacePreservationStatus({ environmentId })` is a read-only
+plugin RPC. It resolves the environment and owning host itself. Version 1 returns
+`protected` with environment, host, canonical root, and generation only when the
+native manager and this provider support mandatory capture. Missing native support
+returns `unavailable`; unowned or inactive environments return `blocked`.
+Inspection does not create a snapshot. Archive completion is distinct from
+workspace removal and snapshot readback.
+
+Admission protects the SDK file mutation routes used by automatic chat exports.
+It cannot constrain arbitrary processes writing directly to the filesystem.
+Retirement still stops workspace processes, refuses unsafe captures, and preserves
+uncertain state. Never treat this as a universal filesystem transaction. Native
+retirement tombstones are retained after failure and restart; do not clear them
+or reuse the same generation implicitly. Snapshots have no automatic deletion.
