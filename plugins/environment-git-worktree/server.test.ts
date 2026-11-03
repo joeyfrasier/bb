@@ -444,3 +444,93 @@ describe("default branch label routing", () => {
     },
   );
 });
+
+describe("workspace preservation capability", () => {
+  it("resolves host and generation from the environment, never caller claims", async () => {
+    const { bb, harness } = createFakePluginHost({
+      sdk: {
+        environments: {
+          get: () => ({
+            id: "env-1",
+            environmentProviderId: GIT_WORKTREE_ENVIRONMENT_PROVIDER_ID,
+            managed: true,
+            path: WORKTREE_PATH,
+            hostId: HOST_ID,
+            environmentProviderInstanceKey: THREAD_ID,
+            lifecycle: { phase: "active" },
+          }),
+        },
+      },
+      experimental_callHostRpc: () => ({
+        status: "protected",
+        canonicalRoot: WORKTREE_PATH,
+        generation: THREAD_ID,
+      }),
+    });
+    await plugin(bb);
+    expect(
+      await harness.callRpc("experimental_workspacePreservationStatus", {
+        environmentId: "env-1",
+      }),
+    ).toEqual({
+      version: 1,
+      status: "protected",
+      environmentId: "env-1",
+      hostId: HOST_ID,
+      canonicalRoot: WORKTREE_PATH,
+      generation: THREAD_ID,
+    });
+    expect(harness.experimental_hostRpcCalls[0]).toMatchObject({
+      method: "workspacePreservationStatus",
+      hostId: HOST_ID,
+      input: { path: WORKTREE_PATH, pathKey: THREAD_ID },
+    });
+    await expect(
+      harness.callRpc("experimental_workspacePreservationStatus", {
+        environmentId: "env-1",
+        hostId: "forged",
+        preserved: true,
+      }),
+    ).rejects.toThrow();
+  });
+  it("fails closed for old native support and unsupported environments", async () => {
+    for (const managed of [true, false]) {
+      const { bb, harness } = createFakePluginHost({
+        sdk: {
+          environments: {
+            get: () => ({
+              id: "env-1",
+              environmentProviderId: GIT_WORKTREE_ENVIRONMENT_PROVIDER_ID,
+              managed,
+              path: WORKTREE_PATH,
+              hostId: HOST_ID,
+              environmentProviderInstanceKey: THREAD_ID,
+              lifecycle: { phase: "active" },
+            }),
+          },
+        },
+        experimental_callHostRpc: () => {
+          throw new Error("old host");
+        },
+      });
+      await plugin(bb);
+      expect(
+        await harness.callRpc("experimental_workspacePreservationStatus", {
+          environmentId: "env-1",
+        }),
+      ).toEqual(
+        managed
+          ? {
+              version: 1,
+              status: "unavailable",
+              reason: "NATIVE_WRITER_FENCE_UNAVAILABLE",
+            }
+          : {
+              version: 1,
+              status: "blocked",
+              reason: "UNSUPPORTED_ENVIRONMENT",
+            },
+      );
+    }
+  });
+});

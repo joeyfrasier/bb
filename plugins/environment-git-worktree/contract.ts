@@ -19,6 +19,32 @@ export const discoveredWorktreeSchema = z
 export type DiscoveredWorktree = z.infer<typeof discoveredWorktreeSchema>;
 
 export const worktreeHostContract = defineRpcContract({
+  workspacePreservationStatus: {
+    input: z
+      .object({ path: z.string().min(1), pathKey: z.string().min(1) })
+      .strict(),
+    output: z.discriminatedUnion("status", [
+      z
+        .object({
+          status: z.literal("protected"),
+          canonicalRoot: z.string().min(1),
+          generation: z.string().min(1),
+        })
+        .strict(),
+      z
+        .object({
+          status: z.literal("unavailable"),
+          reason: z.literal("NATIVE_WRITER_FENCE_UNAVAILABLE"),
+        })
+        .strict(),
+      z
+        .object({
+          status: z.literal("blocked"),
+          reason: z.literal("UNSUPPORTED_ENVIRONMENT"),
+        })
+        .strict(),
+    ]),
+  },
   defaultBaseBranch: {
     input: z.object({ sourcePath: z.string().min(1) }).strict(),
     output: z.object({ branch: z.string().min(1).nullable() }).strict(),
@@ -50,6 +76,7 @@ export const worktreeHostContract = defineRpcContract({
   create: {
     input: z
       .object({
+        preservationVersion: z.literal(1).default(1),
         operationId: z.string().min(1),
         sourcePath: z.string().min(1),
         pathKey: z.string().min(1),
@@ -74,6 +101,7 @@ export const worktreeHostContract = defineRpcContract({
   remove: {
     input: z
       .object({
+        preservationVersion: z.literal(1).default(1),
         operationId: z.string().min(1),
         pathKey: z.string().min(1),
         path: z.string().min(1).nullable(),

@@ -205,3 +205,12 @@ and mise/asdf shims. If a command disappears or exits 127, the next launch
 refreshes discovery. A replaced Node executable is recovered when a compatible
 runtime is available; commands with possible side effects are not retried
 automatically.
+
+Root `.bb` data has one narrow preservation path on supported native hosts.
+The daemon fences SDK file mutations and drains in-flight operations before the
+Worktree provider captures and reads back the complete tree in private storage
+outside managed worktrees. That verified capture can cover ignored `.bb` entries;
+other ignored files still require preservation. Missing native capability or a
+failed capture leaves the workspace intact. Retirement tombstones reject late
+SDK exports after removal and across daemon restart. This does not fence arbitrary
+external filesystem writers or establish off-host backup.

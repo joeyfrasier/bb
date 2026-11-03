@@ -1,3 +1,4 @@
+import { preserveChatData } from "./chat-preservation.js";
 import { experimental_killProcessesWithCwdUnder } from "@get-bb/plugin-sdk/host";
 import {
   findWorktreeEntry,
@@ -44,7 +45,18 @@ import type { ResolvedWorktreeBaseBranch } from "./base-branch.js";
 
 export type BranchMode = "reset" | "reuse-existing";
 
+interface ChatProtection {
+  storagePath: string;
+  fence: {
+    version: 1;
+    root: string;
+    generation: string;
+    additionalRoots?: readonly string[];
+  } | null;
+}
+
 interface CreateWorktreeArgs {
+  chatProtection?: ChatProtection;
   sourcePath: string;
   targetPath: string;
   completionPath: string;
@@ -57,6 +69,7 @@ interface CreateWorktreeArgs {
 }
 
 interface RemoveWorktreeArgs {
+  chatProtection?: ChatProtection;
   path: string;
   completionPath?: string | undefined;
   onProgress?: ProgressCallback | undefined;
@@ -159,6 +172,7 @@ async function removeAbandonedAttemptWorktree(args: {
   sourcePath: string;
   ownWorktreesRoot: string;
   branchName: string;
+  chatProtection?: ChatProtection;
   onProgress: ProgressCallback | undefined;
   signal: AbortSignal | undefined;
 }): Promise<void> {
@@ -187,6 +201,7 @@ async function removeAbandonedAttemptWorktree(args: {
   });
   await removeWorktree({
     path: holder,
+    ...(args.chatProtection ? { chatProtection: args.chatProtection } : {}),
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
   });
   emitStep({
@@ -519,6 +534,7 @@ async function removeCreateTarget(args: CreateWorktreeArgs): Promise<void> {
   await removeWorktree({
     path: args.targetPath,
     completionPath: args.completionPath,
+    ...(args.chatProtection ? { chatProtection: args.chatProtection } : {}),
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
   });
 }
@@ -603,6 +619,7 @@ export async function createWorktree(
   throwIfProvisionAborted(args.signal);
   await removeAbandonedAttemptWorktree({
     sourcePath: args.sourcePath,
+    ...(args.chatProtection ? { chatProtection: args.chatProtection } : {}),
     ownWorktreesRoot: args.ownWorktreesRoot,
     branchName: args.branchName,
     onProgress: args.onProgress,
@@ -709,6 +726,7 @@ async function removeDirectoryIfEmpty(pathToRemove: string): Promise<void> {
 async function inspectRemovableWorktree(
   workspacePath: string,
   signal: AbortSignal | undefined,
+  preservedChat = false,
 ): Promise<{ commonDir: string; head: string }> {
   const inspect = async (args: string[]): Promise<string> => {
     const result = await runGit(args, {
@@ -806,12 +824,23 @@ async function inspectRemovableWorktree(
   const status = await inspect([
     "status",
     "--porcelain=v1",
-    "--untracked-files=normal",
+    "--untracked-files=all",
     "--ignored=matching",
     "--ignore-submodules=none",
     "-z",
   ]);
-  if (status !== "") {
+  const remaining = status
+    .split("\0")
+    .filter(
+      (entry) =>
+        entry !== "" &&
+        !(
+          preservedChat &&
+          entry.startsWith("!! ") &&
+          (entry.slice(3) === ".bb/" || entry.slice(3).startsWith(".bb/"))
+        ),
+    );
+  if (remaining.length !== 0) {
     throw new WorkspaceError(
       "worktree_preservation_required",
       "The worktree has uncommitted or ignored files. Preserve them before retrying cleanup.",
@@ -852,7 +881,45 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     await removeDirectoryIfEmpty(parentPath);
     return;
   }
-  const before = await inspectRemovableWorktree(workspacePath, args.signal);
+  const protection = args.chatProtection;
+  const fence = protection?.fence;
+  const canonicalWorkspace = await realpathOrResolved(workspacePath);
+  const protectedRoots = fence
+    ? [fence.root, ...(fence.additionalRoots ?? [])]
+    : [];
+  if (
+    protection &&
+    fence &&
+    !protectedRoots.some((root) => {
+      const relative = path.relative(root, canonicalWorkspace);
+      return (
+        relative === "" ||
+        (!relative.startsWith("..") && !path.isAbsolute(relative))
+      );
+    })
+  )
+    throw new WorkspaceError(
+      "worktree_fence_unavailable",
+      "Native workspace mutation protection is unavailable. The worktree has been preserved.",
+    );
+  let preservedChat = false;
+  if (protection && fence) {
+    await inspectRemovableWorktree(workspacePath, args.signal, true);
+    await experimental_killProcessesWithCwdUnder({
+      directories: [workspacePath],
+    });
+    const snapshot = await preserveChatData({
+      workspacePath,
+      storagePath: protection.storagePath,
+      ...(args.signal ? { signal: args.signal } : {}),
+    });
+    preservedChat = snapshot.status === "preserved";
+  }
+  const before = await inspectRemovableWorktree(
+    workspacePath,
+    args.signal,
+    preservedChat,
+  );
   const removed = await tryWithCheckoutMutationLock(
     workspacePath,
     () =>
@@ -864,6 +931,7 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
         const current = await inspectRemovableWorktree(
           workspacePath,
           args.signal,
+          preservedChat,
         );
         if (
           current.commonDir !== before.commonDir ||

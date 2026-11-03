@@ -2,7 +2,7 @@ import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const HOST_WORKER_PROTOCOL_VERSION = 2;
+const HOST_WORKER_PROTOCOL_VERSION = 3;
 function createOperationEnvironmentScope(target: NodeJS.ProcessEnv) {
   let active = 0;
   let current: Record<string, string> = {};
@@ -102,6 +102,13 @@ interface WorkerWatchState {
 }
 
 interface HostContext {
+  readonly internal_DO_NOT_USE_workspaceFence: {
+    version: 1;
+    root: string;
+    additionalRoots?: string[];
+    generation: string;
+  } | null;
+  readonly internal_DO_NOT_USE_workspaceFenceVersion: 1;
   readonly signal: AbortSignal;
   readonly lifecycle: { readonly signal: AbortSignal };
   readonly experimental_paths: {
@@ -130,6 +137,13 @@ type ParentMessage =
   | {
       readonly type: "call";
       readonly callId: string;
+      readonly workspaceFence: {
+        version: 1;
+        root: string;
+        additionalRoots?: string[];
+        generation: string;
+      } | null;
+      readonly workspaceFenceVersion: 1;
       readonly method: string;
       readonly input: unknown;
       readonly envVars: Record<string, string>;
@@ -270,6 +284,17 @@ function parseParentMessage(value: unknown): ParentMessage | null {
     typeof value.callId === "string" &&
     typeof value.method === "string"
   ) {
+    const fence = z
+      .object({
+        version: z.literal(1),
+        root: z.string().min(1),
+        additionalRoots: z.array(z.string().min(1)).optional(),
+        generation: z.string().min(1),
+      })
+      .strict()
+      .nullable()
+      .safeParse(value.workspaceFence);
+    if (!fence.success || value.workspaceFenceVersion !== 1) return null;
     const envVars = z
       .record(z.string().regex(/^[^=\x00]+$/u), z.string())
       .safeParse(value.envVars ?? {});
@@ -278,6 +303,8 @@ function parseParentMessage(value: unknown): ParentMessage | null {
       type: "call",
       callId: value.callId,
       method: value.method,
+      workspaceFence: fence.data,
+      workspaceFenceVersion: 1,
       input: value.input,
       envVars: envVars.data,
     };
@@ -545,6 +572,8 @@ async function handleCall(
     controller.signal.throwIfAborted();
     const input = await validate(method.input, message.input);
     const result = await handler(input, {
+      internal_DO_NOT_USE_workspaceFence: message.workspaceFence,
+      internal_DO_NOT_USE_workspaceFenceVersion: message.workspaceFenceVersion,
       signal: controller.signal,
       lifecycle: { signal: lifecycleController.signal },
       experimental_paths: { dataDir, tempDir },

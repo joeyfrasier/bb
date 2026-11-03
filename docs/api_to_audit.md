@@ -4189,3 +4189,13 @@ precedence, bounded discovery failure, and module-ABI preservation after Node
 replacement. Settle the shared process-local instance lifecycle across SDK
 bundle versions and whether `bundledNpmCli` belongs on the public surface before
 removing the prefix.
+
+## Worktree mutation admission
+
+`ExperimentalHostRpcContext.internal_DO_NOT_USE_workspaceFence` and
+`internal_DO_NOT_USE_workspaceFenceVersion` are first-party daemon-to-worktree
+provider coordination. Only environment-git-worktree consumes them. The daemon
+owns admission and persistent retirement tombstones; the provider cannot grant
+itself a fence through RPC input. Native worktree removal uses this same path.
+Keep these internal until lifecycle generation reset, recovery, and additional
+writer classes have an audited public contract.
