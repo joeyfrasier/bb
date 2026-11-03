@@ -11,7 +11,7 @@ permissions:
 jobs:
   check:
     name: Check bb-app and desktop versions
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
 
     steps:
@@ -28,7 +28,7 @@ jobs:
 
   plugin-sdk:
     name: Check plugin SDK version bump
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
 
     steps:

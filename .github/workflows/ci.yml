@@ -18,7 +18,7 @@ concurrency:
 jobs:
   plan:
     name: Select CI checks
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -73,7 +73,7 @@ jobs:
     name: Validate dependencies
     needs: plan
     if: ${{ needs.plan.outputs.dependencies == 'true' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -90,7 +90,7 @@ jobs:
   windows-dependency-cache:
     name: Warm Windows dependencies
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: ${{ github.event.repository.fork && 'windows-2025' || 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 10
     continue-on-error: true
     permissions:
@@ -130,7 +130,7 @@ jobs:
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).foundation }}
     name: Windows host packages (Node 22.x)
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: ${{ github.event.repository.fork && 'windows-2025' || 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -182,7 +182,7 @@ jobs:
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).packaging }}
     name: Windows app smoke (Node 22.x)
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: ${{ github.event.repository.fork && 'windows-2025' || 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 40
     permissions:
       contents: read
@@ -267,7 +267,7 @@ jobs:
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).packaging }}
     name: Windows desktop smoke (Node 22.x)
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: ${{ github.event.repository.fork && 'windows-2025' || 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 40
     permissions:
       contents: read
@@ -338,7 +338,7 @@ jobs:
     name: Windows tests (${{ matrix.shard }}, Node 22.x)
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection)['windows-tests'].include[0] != null }}
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: ${{ github.event.repository.fork && 'windows-2025' || 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -474,7 +474,7 @@ jobs:
     name: Lint and typecheck (ubuntu-latest, Node 22.x)
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).staticNeeded }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -523,7 +523,7 @@ jobs:
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).buildNeeded }}
     name: Checks (ubuntu-latest, Node 22.x)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 30
 
     # `actions: read` is what lets the cache-usage check call the Actions API;
@@ -627,7 +627,7 @@ jobs:
     name: Tests (${{ matrix.shard }}, ubuntu-latest, Node 22.x)
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection)['tests'].include[0] != null }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 30
 
     strategy:
@@ -732,7 +732,7 @@ jobs:
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).forks }}
     name: Plugin Fork Check (${{ matrix.shard }}, ubuntu-latest, Node 22.x)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 20
 
     strategy:
@@ -823,7 +823,7 @@ jobs:
   provider-model-listing:
     needs: plan
     name: Provider Model Listing
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event.repository.fork && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 20
 
     # Fork pull requests cannot read secrets, so the probe would fail
@@ -898,7 +898,7 @@ jobs:
     needs: plan
     if: ${{ fromJSON(needs.plan.outputs.selection).packaging }}
     name: Package Smoke (${{ matrix.os }}, Node ${{ matrix.node-version }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ github.event.repository.fork && fromJSON('{"blacksmith-4vcpu-ubuntu-2404":"ubuntu-24.04","blacksmith-4vcpu-windows-2025":"windows-2025","blacksmith-6vcpu-macos-15":"macos-15"}')[matrix.os] || matrix.os }}
     timeout-minutes: 45
 
     strategy:
@@ -974,7 +974,7 @@ jobs:
   node-compat-smoke:
     name: Node Compatibility Smoke (${{ matrix.os }}, Node ${{ matrix.node-version }})
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ github.event.repository.fork && fromJSON('{"blacksmith-4vcpu-ubuntu-2404":"ubuntu-24.04","blacksmith-4vcpu-windows-2025":"windows-2025","blacksmith-6vcpu-macos-15":"macos-15"}')[matrix.os] || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
